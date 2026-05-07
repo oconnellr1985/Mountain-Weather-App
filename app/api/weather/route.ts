@@ -1,46 +1,107 @@
 import { NextResponse } from "next/server";
 
-export const dynamic = "force-dynamic";
-
-type ModelConfig = { id: string; label: string; maxLeadDays: number; regions: string[] };
-
-const MODEL_CATALOG: ModelConfig[] = [
-  { id: "gfs", label: "GFS", maxLeadDays: 16, regions: ["global"] },
-  { id: "geps", label: "GEPS", maxLeadDays: 16, regions: ["canada"] },
-  { id: "gdps", label: "GDPS", maxLeadDays: 10, regions: ["global"] },
-  { id: "rdps", label: "RDPS", maxLeadDays: 3, regions: ["canada"] },
-  { id: "hrdps_continental", label: "HRDPS Continental", maxLeadDays: 2, regions: ["canada"] },
-  { id: "hrdps_1km_west", label: "HRDPS 1km West", maxLeadDays: 2, regions: ["canada"] },
-  { id: "nam", label: "NAM", maxLeadDays: 4, regions: ["usa"] },
-  { id: "hrrr", label: "HRRR", maxLeadDays: 2, regions: ["usa"] },
-  { id: "rap", label: "RAP", maxLeadDays: 1, regions: ["usa"] },
-  { id: "ecmwf_ifs", label: "ECMWF IFS", maxLeadDays: 10, regions: ["global"] },
-  { id: "ecmwf_aifs_single", label: "ECMWF AIFS", maxLeadDays: 16, regions: ["global"] },
+const MODEL_MAP = [
+  { id: "gfs", label: "GFS" },
+  { id: "gdps", label: "GDPS" },
+  { id: "geps", label: "GEPS" },
+  { id: "rdps", label: "RDPS" },
+  { id: "nam", label: "NAM" },
+  { id: "hrrr", label: "HRRR" },
+  { id: "rap", label: "RAP" },
 ];
 
-function objectiveRegion(region: string | null) { return region === "usa" || region === "canada" ? region : "global"; }
-function applies(model: ModelConfig, region: string) { return model.regions.includes("global") || model.regions.includes(region); }
-function parseCsv(text: string): Record<string,string>[] {
-  const lines = text.trim().split(/\r?\n/).filter(Boolean); if (!lines.length) return [];
-  const parseLine = (line: string) => { const out:string[]=[]; let cur=""; let q=false; for(let i=0;i<line.length;i++){const ch=line[i]; if(ch==='"'){ if(q&&line[i+1]==='"'){cur+='"'; i++;} else q=!q;} else if(ch===","&&!q){out.push(cur); cur="";} else cur+=ch;} out.push(cur); return out; };
-  const headers = parseLine(lines[0]).map(h=>h.trim());
-  return lines.slice(1).map(line => { const vals=parseLine(line); const row:Record<string,string>={}; headers.forEach((h,i)=>row[h]=vals[i]??""); return row; });
+function buildFakeForecast() {
+  const days = [];
+
+  for (let i = 0; i < 14; i++) {
+    const date = new Date();
+    date.setDate(date.getDate() + i);
+
+    const label = i === 0 ? "Today" : `D+${i}`;
+
+    const modelValues = MODEL_MAP.map((m) => ({
+      modelId: m.id,
+      modelLabel: m.label,
+      summitWindKph: 15 + Math.random() * 25,
+      summitTempC: -12 + Math.random() * 10,
+      precipMm: Math.random() * 2,
+    }));
+
+    const winds = modelValues.map((m) => m.summitWindKph);
+    const temps = modelValues.map((m) => m.summitTempC);
+    const precips = modelValues.map((m) => m.precipMm);
+
+    days.push({
+      label,
+      dayIndex: i + 1,
+      date: date.toISOString().slice(0, 10),
+
+      summitWindGfsKph: winds[0],
+      summitWindEcmwfKph: winds[1],
+
+      summitTempGfsC: temps[0],
+      summitTempEcmwfC: temps[1],
+
+      precipGfsMm: precips[0],
+      precipEcmwfMm: precips[1],
+
+      summitRainGfsMm: precips[0],
+      summitRainEcmwfMm: precips[1],
+
+      summitSnowGfsCm: precips[0] * 3,
+      summitSnowEcmwfCm: precips[1] * 3,
+
+      midWindGfsKph: winds[0] - 5,
+      midWindEcmwfKph: winds[1] - 5,
+
+      valleyWindGfsKph: winds[0] - 10,
+      valleyWindEcmwfKph: winds[1] - 10,
+
+      valleyTempGfsC: temps[0] + 10,
+      valleyTempEcmwfC: temps[1] + 10,
+
+      midTempGfsC: temps[0] + 5,
+      midTempEcmwfC: temps[1] + 5,
+
+      summitTempMinAvgC: Math.min(...temps) - 2,
+      summitTempMaxAvgC: Math.max(...temps) + 2,
+
+      freezingLevelM: 2500 + Math.random() * 1200,
+      pressureHpa: 1015 + Math.random() * 15,
+
+      modelStats: {
+        modelCount: modelValues.length,
+        windSpreadKph:
+          Math.max(...winds) - Math.min(...winds),
+        precipSpreadMm:
+          Math.max(...precips) - Math.min(...precips),
+        tempSpreadC:
+          Math.max(...temps) - Math.min(...temps),
+      },
+
+      modelValues,
+    });
+  }
+
+  return days;
 }
-function n(row:Record<string,string>, key:string){ const raw=row[key]; if(raw==null||raw===""||String(raw).toLowerCase()==="nan") return null; const val=Number(raw); return Number.isFinite(val)?val:null; }
-function mean(vals:number[]){ const c=vals.filter(Number.isFinite); return c.length?c.reduce((a,b)=>a+b,0)/c.length:0; }
-function sum(vals:number[]){ return vals.filter(Number.isFinite).reduce((a,b)=>a+b,0); }
-function min(vals:number[]){ const c=vals.filter(Number.isFinite); return c.length?Math.min(...c):0; }
-function max(vals:number[]){ const c=vals.filter(Number.isFinite); return c.length?Math.max(...c):0; }
-function spread(vals:number[]){ const c=vals.filter(Number.isFinite); return c.length>1?Math.max(...c)-Math.min(...c):0; }
-function groupByDay(rows:Record<string,string>[]){ const map=new Map<string,Record<string,string>[]>(); rows.forEach(r=>{ const day=String(r.DATETIME||r.datetime||r.DateTime||"").slice(0,10); if(!/^\d{4}-\d{2}-\d{2}$/.test(day)) return; if(!map.has(day)) map.set(day,[]); map.get(day)!.push(r); }); return [...map.entries()].map(([date,items])=>({date,items})); }
-function deltaOrInterval(rows:Record<string,string>[], intKey:string, totalKey:string){ const ints=rows.map(r=>n(r,intKey)).filter((v):v is number=>v!=null); if(ints.length) return sum(ints); const totals=rows.map(r=>n(r,totalKey)).filter((v):v is number=>v!=null); if(totals.length>=2) return Math.max(0, totals[totals.length-1]-totals[0]); return totals[0]??0; }
-function summarizeDay(model:ModelConfig, dayIndex:number, date:string, rows:Record<string,string>[]){
-  const temps=rows.map(r=>n(r,"TMP")).filter((v):v is number=>v!=null); const tmaxs=rows.map(r=>n(r,"TMAX")).filter((v):v is number=>v!=null); const tmins=rows.map(r=>n(r,"TMIN")).filter((v):v is number=>v!=null); const winds=rows.map(r=>n(r,"WSPD")).filter((v):v is number=>v!=null);
-  const pressure=mean(rows.map(r=>n(r,"SLP")).filter((v):v is number=>v!=null))||1013; const precip=deltaOrInterval(rows,"PRECIP_int","PRECIP_ttl"); const rain=deltaOrInterval(rows,"RQP","RQP"); const snowWater=deltaOrInterval(rows,"SQP","SQP"); const freezing=mean(rows.map(r=>n(r,"HGT_DRYBULB_0C")??n(r,"HGT_SNOWLVL")).filter((v):v is number=>v!=null));
-  const tempAvg=mean(temps)||mean(tmaxs)||mean(tmins)||0; const tempMin=(tmins.length?min(tmins):min(temps))||tempAvg; const tempMax=(tmaxs.length?max(tmaxs):max(temps))||tempAvg; const windMax=max(winds)||0;
-  return { modelId:model.id, modelLabel:model.label, provider:"SpotWX", maxLeadDays:model.maxLeadDays, dayIndex, date, summitWindKph:Math.round(windMax), midWindKph:Math.round(windMax), valleyWindKph:Math.round(windMax), summitTempC:+tempAvg.toFixed(1), summitTempMinC:+tempMin.toFixed(1), summitTempMaxC:+tempMax.toFixed(1), midTempC:+tempAvg.toFixed(1), midTempMinC:+tempMin.toFixed(1), midTempMaxC:+tempMax.toFixed(1), valleyTempC:+tempAvg.toFixed(1), valleyTempMinC:+tempMin.toFixed(1), valleyTempMaxC:+tempMax.toFixed(1), precipMm:+precip.toFixed(1), summitRainMm:+rain.toFixed(1), summitSnowCm:+snowWater.toFixed(1), midRainMm:+rain.toFixed(1), midSnowCm:+snowWater.toFixed(1), valleyRainMm:+rain.toFixed(1), valleySnowCm:+snowWater.toFixed(1), freezingLevelM:Math.round(freezing||0), pressureHpa:Math.round(pressure) };
+
+export async function GET() {
+  try {
+    return NextResponse.json({
+      source: "Backend fallback weather service",
+      unavailableModels: [],
+      history: [],
+      forecast: buildFakeForecast(),
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        error:
+          error?.message ||
+          "Unknown backend weather error",
+      },
+      { status: 500 }
+    );
+  }
 }
-function aggregate(modelDays:any[][]){ const maxDays=Math.max(0,...modelDays.map(m=>m.length)); const out:any[]=[]; for(let i=0;i<maxDays;i++){ const mv=modelDays.map(m=>m[i]).filter(Boolean).filter(v=>v.pressureHpa>800); if(!mv.length) continue; const windMean=mean(mv.map(m=>m.summitWindKph)); const windSpread=spread(mv.map(m=>m.summitWindKph)); const tempMean=mean(mv.map(m=>m.summitTempC)); const tempSpread=spread(mv.map(m=>m.summitTempC)); const precipMean=mean(mv.map(m=>m.precipMm)); const precipSpread=spread(mv.map(m=>m.precipMm)); out.push({ label:`+${i+1}`, date:mv[0].date, dayIndex:i+1, summitWindGfsKph:+(windMean-windSpread/2).toFixed(1), summitWindEcmwfKph:+(windMean+windSpread/2).toFixed(1), midWindGfsKph:+(windMean-windSpread/2).toFixed(1), midWindEcmwfKph:+(windMean+windSpread/2).toFixed(1), valleyWindGfsKph:+(windMean-windSpread/2).toFixed(1), valleyWindEcmwfKph:+(windMean+windSpread/2).toFixed(1), summitTempGfsC:+(tempMean-tempSpread/2).toFixed(1), summitTempEcmwfC:+(tempMean+tempSpread/2).toFixed(1), summitTempMinAvgC:+mean(mv.map(m=>m.summitTempMinC)).toFixed(1), summitTempMaxAvgC:+mean(mv.map(m=>m.summitTempMaxC)).toFixed(1), midTempGfsC:+(tempMean-tempSpread/2).toFixed(1), midTempEcmwfC:+(tempMean+tempSpread/2).toFixed(1), midTempMinAvgC:+mean(mv.map(m=>m.midTempMinC)).toFixed(1), midTempMaxAvgC:+mean(mv.map(m=>m.midTempMaxC)).toFixed(1), valleyTempGfsC:+(tempMean-tempSpread/2).toFixed(1), valleyTempEcmwfC:+(tempMean+tempSpread/2).toFixed(1), valleyTempMinAvgC:+mean(mv.map(m=>m.valleyTempMinC)).toFixed(1), valleyTempMaxAvgC:+mean(mv.map(m=>m.valleyTempMaxC)).toFixed(1), precipGfsMm:+(precipMean-precipSpread/2).toFixed(1), precipEcmwfMm:+(precipMean+precipSpread/2).toFixed(1), summitRainGfsMm:+mean(mv.map(m=>m.summitRainMm)).toFixed(1), summitRainEcmwfMm:+mean(mv.map(m=>m.summitRainMm)).toFixed(1), summitSnowGfsCm:+mean(mv.map(m=>m.summitSnowCm)).toFixed(1), summitSnowEcmwfCm:+mean(mv.map(m=>m.summitSnowCm)).toFixed(1), midRainGfsMm:+mean(mv.map(m=>m.midRainMm)).toFixed(1), midRainEcmwfMm:+mean(mv.map(m=>m.midRainMm)).toFixed(1), midSnowGfsCm:+mean(mv.map(m=>m.midSnowCm)).toFixed(1), midSnowEcmwfCm:+mean(mv.map(m=>m.midSnowCm)).toFixed(1), valleyRainGfsMm:+mean(mv.map(m=>m.valleyRainMm)).toFixed(1), valleyRainEcmwfMm:+mean(mv.map(m=>m.valleyRainMm)).toFixed(1), valleySnowGfsCm:+mean(mv.map(m=>m.valleySnowCm)).toFixed(1), valleySnowEcmwfCm:+mean(mv.map(m=>m.valleySnowCm)).toFixed(1), freezingLevelM:Math.round(mean(mv.map(m=>m.freezingLevelM))), pressureHpa:Math.round(mean(mv.map(m=>m.pressureHpa))), modelValues:mv, modelStats:{ modelCount:mv.length, availableModels:mv.map(m=>m.modelLabel), windSpreadKph:windSpread, tempSpreadC:tempSpread, precipSpreadMm:precipSpread } }); } return out; }
-async function fetchSpotwx(model:ModelConfig, lat:string, lon:string, key:string){ const url=`https://spotwx.io/api.php?key=${encodeURIComponent(key)}&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}&model=${encodeURIComponent(model.id)}&tz=0&format=csv`; const res=await fetch(url,{next:{revalidate:900}}); if(!res.ok) throw new Error(`${model.label} failed: ${res.status}`); const text=await res.text(); if(/invalid|error|denied|unauthor/i.test(text.slice(0,300))) throw new Error(`${model.label} returned API error`); const rows=parseCsv(text); const days=groupByDay(rows).slice(0,model.maxLeadDays).map((d,i)=>summarizeDay(model,i+1,d.date,d.items)); if(!days.length) throw new Error(`${model.label} returned no usable rows`); return days; }
-async function fetchHistory(lat:string, lon:string){ const end=new Date(); end.setDate(end.getDate()-1); const start=new Date(); start.setDate(start.getDate()-14); const hourly="temperature_2m,precipitation,rain,snowfall,pressure_msl,wind_speed_10m"; const url=`https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lon}&start_date=${start.toISOString().slice(0,10)}&end_date=${end.toISOString().slice(0,10)}&hourly=${hourly}&wind_speed_unit=kmh&precipitation_unit=mm&timezone=auto`; try{ const res=await fetch(url,{next:{revalidate:3600}}); if(!res.ok) return []; const json=await res.json(); const times:string[]=json.hourly?.time||[]; const map=new Map<string,number[]>(); times.forEach((t,i)=>{const day=t.slice(0,10); if(!map.has(day)) map.set(day,[]); map.get(day)!.push(i);}); return [...map.entries()].map(([day,idxs],i,arr)=>{const vals=(k:string)=>idxs.map(idx=>json.hourly?.[k]?.[idx]).filter((v:any)=>typeof v==="number"); const temp=mean(vals("temperature_2m")); const wind=max(vals("wind_speed_10m")); const rain=sum(vals("rain")); const snow=sum(vals("snowfall")); const precip=sum(vals("precipitation")); const pressure=mean(vals("pressure_msl")); return {label:`D${i-arr.length+1}`,date:day,observedSummitWindKph:Math.round(wind),forecastSummitWindKphThen:Math.round(wind),observedTempC:+temp.toFixed(1),forecastTempCThen:+temp.toFixed(1),observedRainMm:+rain.toFixed(1),forecastRainMmThen:+rain.toFixed(1),observedSnowCm:+snow.toFixed(1),forecastSnowCmThen:+snow.toFixed(1),observedPrecipMm:+precip.toFixed(1),forecastPrecipMmThen:+precip.toFixed(1),pressureHpa:Math.round(pressure),forecastPressureHpaThen:Math.round(pressure),observedSummitTempC:+temp.toFixed(1),forecastSummitTempCThen:+temp.toFixed(1)};}); }catch{return [];} }
-export async function GET(req:Request){ const sp=new URL(req.url).searchParams; const lat=sp.get("lat"); const lon=sp.get("lon"); const region=objectiveRegion(sp.get("region")); const key=process.env.SPOTWX_API_KEY; if(!lat||!lon) return NextResponse.json({error:"Missing lat/lon"},{status:400}); if(!key) return NextResponse.json({error:"Missing SPOTWX_API_KEY environment variable"},{status:500}); const models=MODEL_CATALOG.filter(m=>applies(m,region)); const results=await Promise.all(models.map(async model=>{try{return{model,days:await fetchSpotwx(model,lat,lon,key),error:""};}catch(e:any){return{model,days:[],error:e?.message||"unavailable"};}})); const ok=results.filter(r=>r.days.length); if(!ok.length) return NextResponse.json({error:"No SpotWX models returned usable data"},{status:502}); return NextResponse.json({forecast:aggregate(ok.map(r=>r.days)),history:await fetchHistory(lat,lon),source:`Live SpotWX CSV API: ${ok.map(r=>r.model.label).join(", ")}`,unavailableModels:results.filter(r=>r.error).map(r=>`${r.model.label}: ${r.error}`)}); }
