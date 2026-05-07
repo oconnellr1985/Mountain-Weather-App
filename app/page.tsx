@@ -97,7 +97,7 @@ function splitPrecipByTemp(totalMm, tempC) {
   return { rainMm: Number((totalMm * (1 - snowFraction)).toFixed(1)), snowCm: Number((totalMm * snowFraction).toFixed(1)) };
 }
 
-function groupHourlyByDay(hourly = {}) {
+function groupHourlyByDay(hourly: any = {}) {
   const rows = [];
   const times = Array.isArray(hourly.time) ? hourly.time : [];
   times.forEach((time, index) => {
