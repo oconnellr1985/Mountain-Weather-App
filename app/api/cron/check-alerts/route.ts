@@ -1,61 +1,7 @@
 import { NextResponse } from "next/server";
 import { Resend } from "resend";
-
-const CLIMBS: Record<string, any> = {
-  "adams-sw-chutes": { name: "Mount Adams — SW Chutes", lat: 46.202, lon: -121.49, summitM: 3743, region: "usa", activeFromMonth: 1 },
-  "robson-kain": { name: "Mount Robson — Kain Face", lat: 53.11, lon: -119.156, summitM: 3954, region: "canada", activeFromMonth: 7 },
-  "sir-donald-nw-ridge": { name: "Mount Sir Donald — NW Ridge", lat: 51.263, lon: -117.437, summitM: 3284, region: "canada", activeFromMonth: 7 },
-  "temple-aemmer": { name: "Mount Temple — Aemmer Couloir", lat: 51.35, lon: -116.207, summitM: 3544, region: "canada", activeFromMonth: 1 },
-};
-
-function getRules() {
-  const raw = process.env.ALERT_RULES_JSON;
-  if (raw) return JSON.parse(raw);
-  return [{ climbId: "adams-sw-chutes", email: process.env.ALERT_TO_EMAIL, minQuality: Number(process.env.DEFAULT_MIN_QUALITY || 8), minConfidence: Number(process.env.DEFAULT_MIN_CONFIDENCE || 5.5), enabled: true }];
-}
-
-function monthUtc() { return new Date().getUTCMonth() + 1; }
-function baseUrl(req: Request) { const host = req.headers.get("x-forwarded-host") || req.headers.get("host"); const proto = req.headers.get("x-forwarded-proto") || "https"; return `${proto}://${host}`; }
-
-function score(forecast: any[]) {
-  const days = forecast.slice(0, 3);
-  if (days.length < 3) return { quality: 0, confidence: 0, label: "NO DATA" };
-  const avgWind = days.reduce((s, d) => s + ((d.summitWindGfsKph + d.summitWindEcmwfKph) / 2), 0) / days.length;
-  const precip = days.reduce((s, d) => s + ((d.precipGfsMm + d.precipEcmwfMm) / 2), 0);
-  const modelSpread = days.reduce((s, d) => s + (d.modelStats?.windSpreadKph || 0) + (d.modelStats?.tempSpreadC || 0), 0) / days.length;
-  return { quality: Math.max(0, Math.min(10, 10 - Math.max(0, avgWind - 30) * 0.12 - precip * 0.7)), confidence: Math.max(0, Math.min(10, 8 - modelSpread * 0.08)), label: "D+1 to D+3" };
-}
-
-async function sendEmail(to: string, subject: string, text: string) {
-  const resend = new Resend(process.env.RESEND_API_KEY);
-  const result = await resend.emails.send({ from: process.env.ALERT_FROM_EMAIL!, to, subject, text, html: `<pre style="font-family:system-ui;white-space:pre-wrap">${text}</pre>` });
-  if (result.error) throw new Error(result.error.message || "Resend failed");
-  return result.data?.id;
-}
-
-export async function GET(req: Request) {
-  const secret = new URL(req.url).searchParams.get("secret") || req.headers.get("x-cron-secret");
-  if (process.env.CRON_SECRET && secret !== process.env.CRON_SECRET) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!process.env.RESEND_API_KEY || !process.env.ALERT_FROM_EMAIL) return NextResponse.json({ error: "Missing Resend env vars" }, { status: 500 });
-
-  const results = [];
-  for (const rule of getRules()) {
-    try {
-      if (!rule.enabled || !rule.email) { results.push({ rule, skipped: "disabled or no email" }); continue; }
-      const climb = CLIMBS[rule.climbId];
-      if (!climb) throw new Error(`Unknown climbId: ${rule.climbId}`);
-      if (climb.activeFromMonth && monthUtc() < climb.activeFromMonth) { results.push({ rule: rule.climbId, skipped: `inactive until month ${climb.activeFromMonth}` }); continue; }
-      const weatherUrl = `${baseUrl(req)}/api/weather?climbId=${rule.climbId}&lat=${climb.lat}&lon=${climb.lon}&summitM=${climb.summitM}&region=${climb.region}`;
-      const weatherResponse = await fetch(weatherUrl, { cache: "no-store" });
-      const weather = await weatherResponse.json();
-      if (!weatherResponse.ok) throw new Error(weather.error || "Weather fetch failed");
-      const s = score(weather.forecast || []);
-      if (s.quality >= (rule.minQuality ?? 8) && s.confidence >= (rule.minConfidence ?? 5.5)) {
-        const text = `Mountain Window Alert\n\nObjective: ${climb.name}\nWindow: ${s.label}\nQuality: ${s.quality.toFixed(1)} / 10\nConfidence: ${s.confidence.toFixed(1)} / 10\nSource: ${weather.source}\n\nOpen the app for model traces and manual review.`;
-        const id = await sendEmail(rule.email, `Mountain Window Alert: ${climb.name}`, text);
-        results.push({ rule: rule.climbId, sent: true, resendId: id, score: s });
-      } else results.push({ rule: rule.climbId, sent: false, score: s });
-    } catch (e: any) { results.push({ rule: rule.climbId, error: e?.message || "unknown error" }); }
-  }
-  return NextResponse.json({ ok: true, results });
-}
+export const dynamic="force-dynamic";
+const OBJECTIVES:any={"robson-kain":{name:"Mount Robson — Kain Face",lat:53.11,lon:-119.156,summitM:3954,region:"canada"},"adams-sw-chutes":{name:"Mount Adams — SW Chutes",lat:46.202,lon:-121.49,summitM:3743,region:"usa"},"temple-aemmer":{name:"Mount Temple — Aemmer Couloir",lat:51.35,lon:-116.207,summitM:3544,region:"canada"},"sir-donald-nw-ridge":{name:"Mount Sir Donald — NW Ridge",lat:51.263,lon:-117.437,summitM:3284,region:"canada"}};
+function avg(n:number[]){const v=n.filter(x=>typeof x==="number"&&Number.isFinite(x));return v.length?v.reduce((s,x)=>s+x,0)/v.length:0} function score(days:any[]){const wind=avg(days.map(d=>((d.summitWindGfsKph||0)+(d.summitWindEcmwfKph||0))/2)); const p=days.reduce((s,d)=>s+((d.precipGfsMm||0)+(d.precipEcmwfMm||0))/2,0); const sp=avg(days.map(d=>d.modelStats?.windSpreadKph||0)); return Math.max(0,Math.min(10,10-Math.max(0,wind-30)*.12-p*.7-sp*.05))}
+async function kvGet(k:string){const u=process.env.KV_REST_API_URL,t=process.env.KV_REST_API_TOKEN;if(!u||!t)return null;const r=await fetch(`${u}/get/${encodeURIComponent(k)}`,{headers:{Authorization:`Bearer ${t}`},cache:"no-store"});const j=await r.json().catch(()=>null);return j?.result||null} async function kvSet(k:string,v:string){const u=process.env.KV_REST_API_URL,t=process.env.KV_REST_API_TOKEN;if(!u||!t)return false;await fetch(`${u}/set/${encodeURIComponent(k)}/${encodeURIComponent(v)}`,{headers:{Authorization:`Bearer ${t}`},cache:"no-store"});return true}
+export async function GET(req:Request){const secret=process.env.CRON_SECRET, requestSecret=new URL(req.url).searchParams.get("secret"); if(secret&&requestSecret!==secret&&req.headers.get("authorization")!==`Bearer ${secret}`)return NextResponse.json({error:"Unauthorized"},{status:401}); const base=new URL(req.url).origin; const objectiveId=process.env.ALERT_OBJECTIVE_ID||"adams-sw-chutes", obj=OBJECTIVES[objectiveId]||OBJECTIVES["adams-sw-chutes"]; const min=Number(process.env.ALERT_MIN_QUALITY||8), to=process.env.ALERT_TO_EMAIL, from=process.env.ALERT_FROM_EMAIL, apiKey=process.env.RESEND_API_KEY; if(!to||!from||!apiKey)return NextResponse.json({error:"Missing RESEND_API_KEY, ALERT_FROM_EMAIL, or ALERT_TO_EMAIL"},{status:500}); const wx=await fetch(`${base}/api/weather?lat=${obj.lat}&lon=${obj.lon}&summitM=${obj.summitM}&region=${obj.region}&climbId=${objectiveId}`,{cache:"no-store"}).then(r=>r.json()); if(!Array.isArray(wx.forecast)||wx.forecast.length<3)return NextResponse.json({sent:false,reason:"NO DATA",weather:wx}); const cand=[]; for(let i=0;i<=wx.forecast.length-3;i++){const days=wx.forecast.slice(i,i+3); cand.push({start:i+1,end:i+3,quality:score(days),days})} const best=cand.sort((a,b)=>b.quality-a.quality)[0]; if(!best||best.quality<min)return NextResponse.json({sent:false,reason:"below threshold",best}); const key=`alert:${objectiveId}:${best.start}-${best.end}:${best.quality.toFixed(1)}`; if(await kvGet(key))return NextResponse.json({sent:false,reason:"duplicate suppressed",best}); const resend=new Resend(apiKey); const subject=`Mountain Window Watch: ${obj.name} ${best.quality.toFixed(1)}/10`; const body=`Possible weather window forming for ${obj.name}.\n\nBest window: D+${best.start} to D+${best.end}\nQuality: ${best.quality.toFixed(1)}/10\nModels: ${(best.days[0]?.modelStats?.availableModels||[]).join(", ")}\n\nThis is a watch alert only, not a go/no-go recommendation.`; const result=await resend.emails.send({from,to,subject,text:body,html:`<pre>${body.replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c] as string))}</pre>`}); if(result.error)return NextResponse.json({error:result.error.message,details:result.error},{status:500}); await kvSet(key,new Date().toISOString()); return NextResponse.json({sent:true,id:result.data?.id,best,dedupe:!!process.env.KV_REST_API_URL})}
