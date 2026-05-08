@@ -42,7 +42,7 @@ const clampScore = (value) => Math.max(0, Math.min(10, Number(value) || 0));
 const avg = (values = []) => { const clean = values.filter((v) => typeof v === "number" && Number.isFinite(v)); return clean.length ? clean.reduce((s, v) => s + v, 0) / clean.length : 0; };
 const spread = (values = []) => { const clean = values.filter((v) => typeof v === "number" && Number.isFinite(v)); return clean.length > 1 ? Math.max(...clean) - Math.min(...clean) : 0; };
 function getObjectiveRegion(climb) { if (climb.region.includes("Washington")) return "usa"; if (climb.region.includes("Canadian") || climb.region.includes("Selkirks") || climb.region.includes("Purcells")) return "canada"; return "global"; }
-function modelAppliesToClimb(model, climb) { const region = getObjectiveRegion(climb); return model.regions.includes("global") || model.regions.includes(region); }
+function modelAppliesToClimb(model, climb) { if (!model || !climb) return false; const region = getObjectiveRegion(climb); return model.regions.includes("global") || model.regions.includes(region); }
 function scoreColor(score, inverse = false) { const v = inverse ? 10 - score : score; return v >= 7.5 ? "text-emerald-700" : v >= 5 ? "text-yellow-700" : "text-red-700"; }
 function dangerStyle(d) { if (d <= 0) return { backgroundColor: "#e5e7eb", color: "#111827", border: "1px solid #cbd5e1" }; if (d === 1) return { backgroundColor: "#00a651", color: "#fff" }; if (d === 2) return { backgroundColor: "#fff200", color: "#111827" }; if (d === 3) return { backgroundColor: "#f7941d", color: "#111827" }; if (d === 4) return { backgroundColor: "#ed1c24", color: "#fff" }; return { backgroundColor: "#000", color: "#fff" }; }
 function DangerBadge({ rating }) { const labels = ["No Rating", "Low", "Moderate", "Considerable", "High", "Extreme"]; return <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold" style={dangerStyle(rating)}>{labels[rating] || "No Rating"}</span>; }
@@ -101,8 +101,8 @@ function runTests() {
   const robson = climbs[0];
   console.assert(scoreWindowForDays(robson, [{ summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }, { summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }, { summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }]) < 7, "Robson -30C should not score as strong");
   console.assert(findBestUpcomingWindow(robson, [], []).label === "NO DATA", "No forecast should return NO DATA window");
-  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "rap"), climbs.find((c) => c.id === "adams-sw-chutes")), "RAP should apply to US objectives");
-  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "hrdps_continental"), climbs.find((c) => c.id === "robson-kain")), "HRDPS should apply to Canadian objectives");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gfs_hrrr"), climbs.find((c) => c.id === "adams-sw-chutes")), "HRRR should apply to US objectives");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gem_hrdps_continental"), climbs.find((c) => c.id === "robson-kain")), "HRDPS should apply to Canadian objectives");
 }
 
 function MetricCard({ icon: IconComponent, label, value, detail, className = "" }) { return <Card><CardContent className="p-4"><div className="flex items-center gap-2 text-sm text-slate-500"><IconComponent />{label}</div><div className={`mt-2 text-2xl font-semibold ${className}`}>{value}</div><div className="mt-1 text-sm text-slate-500">{detail}</div></CardContent></Card>; }
