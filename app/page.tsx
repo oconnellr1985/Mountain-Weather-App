@@ -4,11 +4,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 const climbs = [
-  { id: "robson-kain", name: "Mount Robson — Kain Face", region: "Canadian Rockies", lat: 53.11, lon: -119.156, summitM: 3954, style: "summer alpine / winter alpine", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 0, maxPrecipMm3Day: 0, minFreezingLevelM: 3000, maxFreezingLevelM: 4300, minSummitTempC: -15, idealSummitTempMinC: -10, coldSummitPenaltyPerC: 0.25, windPenaltyPerKph: 0.12, precipPenaltyPerMm: 0.45, strictNoPrecip: true } },
-  { id: "sir-donald-nw-ridge", name: "Mount Sir Donald — NW Ridge", region: "Selkirks", lat: 51.263, lon: -117.437, summitM: 3284, style: "summer alpine rock", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 35, maxPrecipMm24h: 0, maxPrecipMm3Day: 0, minFreezingLevelM: 3300, maxFreezingLevelM: 4600, windPenaltyPerKph: 0.06, precipPenaltyPerMm: 1.0, rockDryObjective: true, minSummitTempC: 0, idealValleyTempC: 30, strictNoPrecip: true } },
-  { id: "bugaboo-spire", name: "Bugaboo Spire — Kain Route", region: "Purcells", lat: 50.736, lon: -116.771, summitM: 3204, style: "summer alpine rock", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 1, minFreezingLevelM: 2900, maxFreezingLevelM: 4300 } },
-  { id: "adams-sw-chutes", name: "Mount Adams — SW Chutes", region: "Washington Cascades", lat: 46.202, lon: -121.49, summitM: 3743, style: "winter / spring ski mountaineering", defaultMode: "winter", activeFromMonth: 1, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 0.5, maxPrecipMm3Day: 1.5, minFreezingLevelM: 2200, maxFreezingLevelM: 3800, windPenaltyPerKph: 0.11, precipPenaltyPerMm: 0.55, skiCornObjective: true, idealPressureHpa: 1020, idealMidTempMinC: -4, idealMidTempMaxC: 4, idealSummitTempMaxC: 1 } },
-  { id: "temple-aemmer", name: "Mount Temple — Aemmer Couloir", region: "Canadian Rockies", lat: 51.35, lon: -116.207, summitM: 3544, style: "winter ski mountaineering / steep snow", defaultMode: "winter", activeFromMonth: 1, thresholds: { maxSummitWindKph: 35, maxPrecipMm24h: 3, minFreezingLevelM: 1500, maxFreezingLevelM: 3300 } },
+  { id: "robson-kain", name: "Mount Robson — Kain Face", region: "Canadian Rockies", lat: 53.11, lon: -119.156, summitM: 3954, style: "mixed alpine / ice", routeType: "mixed_alpine_ice", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 0, maxPrecipMm3Day: 0, minFreezingLevelM: 2800, maxFreezingLevelM: 4300, idealFreezingLevelM: 3600, minSummitTempC: -15, idealSummitTempMinC: -10, maxSummitTempC: 2, coldSummitPenaltyPerC: 0.25, windPenaltyPerKph: 0.12, precipPenaltyPerMm: 0.45, strictNoPrecip: true, requiresOvernightFreeze: true, requiresClearSkies: true } },
+  { id: "sir-donald-nw-ridge", name: "Mount Sir Donald — NW Ridge", region: "Selkirks", lat: 51.263, lon: -117.437, summitM: 3284, style: "pure alpine rock", routeType: "pure_rock", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 35, maxPrecipMm24h: 0, maxPrecipMm3Day: 0, minFreezingLevelM: 3400, maxFreezingLevelM: 5200, windPenaltyPerKph: 0.06, precipPenaltyPerMm: 1.2, rockDryObjective: true, minSummitTempC: 1, idealSummitTempC: 8, idealValleyTempC: 30, strictNoPrecip: true, requiresClearSkies: true } },
+  { id: "bugaboo-spire", name: "Bugaboo Spire — Kain Route", region: "Purcells", lat: 50.736, lon: -116.771, summitM: 3204, style: "pure alpine rock", routeType: "pure_rock", defaultMode: "summer", activeFromMonth: 7, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 0.5, maxPrecipMm3Day: 1, minFreezingLevelM: 3200, maxFreezingLevelM: 5000, minSummitTempC: 0, idealSummitTempC: 6, precipPenaltyPerMm: 0.9, rockDryObjective: true, requiresClearSkies: true } },
+  { id: "adams-sw-chutes", name: "Mount Adams — SW Chutes", region: "Washington Cascades", lat: 46.202, lon: -121.49, summitM: 3743, style: "spring ski mountaineering / corn cycle", routeType: "ski_corn", defaultMode: "winter", activeFromMonth: 1, thresholds: { maxSummitWindKph: 30, maxPrecipMm24h: 0.5, maxPrecipMm3Day: 1.5, minFreezingLevelM: 2600, maxFreezingLevelM: 4100, idealFreezingLevelM: 3700, windPenaltyPerKph: 0.11, precipPenaltyPerMm: 0.55, skiCornObjective: true, idealPressureHpa: 1020, idealMidTempMinC: -4, idealMidTempMaxC: 5, idealSummitTempMinC: -8, idealSummitTempMaxC: 1.5, requiresOvernightFreeze: true, requiresClearSkies: true } },
+  { id: "temple-aemmer", name: "Mount Temple — Aemmer Couloir", region: "Canadian Rockies", lat: 51.35, lon: -116.207, summitM: 3544, style: "winter alpine / steep snow", routeType: "mixed_alpine_ice", defaultMode: "winter", activeFromMonth: 1, thresholds: { maxSummitWindKph: 35, maxPrecipMm24h: 2, maxPrecipMm3Day: 4, minFreezingLevelM: 1200, maxFreezingLevelM: 3300, idealFreezingLevelM: 2600, minSummitTempC: -18, maxSummitTempC: 0, requiresOvernightFreeze: true, requiresClearSkies: true } },
 ];
 
 const FORECAST_MODEL_CATALOG = [
@@ -18,6 +18,7 @@ const FORECAST_MODEL_CATALOG = [
   { id: "gem_hrdps_continental", label: "HRDPS Continental", provider: "ECCC via Open-Meteo", maxLeadDays: 2, regions: ["canada"] },
   { id: "nam_conus", label: "NAM CONUS", provider: "NOAA via Open-Meteo", maxLeadDays: 4, regions: ["usa"] },
   { id: "gfs_hrrr", label: "HRRR", provider: "NOAA via Open-Meteo", maxLeadDays: 2, regions: ["usa"] },
+  { id: "noaa_rap", label: "RAP", provider: "NOAA direct connector required", maxLeadDays: 1, regions: ["usa"] },
   { id: "ecmwf_ifs025", label: "ECMWF IFS", provider: "ECMWF via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
   { id: "ecmwf_aifs025", label: "ECMWF AIFS", provider: "ECMWF via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
 ];
@@ -75,22 +76,83 @@ async function fetchAvalancheFromBackend(climb) {
   return { ok: true, avalancheHistory: Array.isArray(data.avalancheHistory) ? data.avalancheHistory : [], source: data.source || "Live avalanche API", summary: data.summary || { headline: "No current avalanche bulletin was returned for this objective.", riskScore: 0, last: { alpine: 0, problems: [] }, persistentDays: 0, windSlabDays: 0 }, error: "" };
 }
 
+function meanDayValue(day, lowKey, highKey) { return ((day[lowKey] || 0) + (day[highKey] || 0)) / 2; }
+function daySummitTemp(day) { return meanDayValue(day, "summitTempGfsC", "summitTempEcmwfC"); }
+function dayMidTemp(day) { return meanDayValue(day, "midTempGfsC", "midTempEcmwfC"); }
+function dayValleyTemp(day) { return meanDayValue(day, "valleyTempGfsC", "valleyTempEcmwfC"); }
+function dayPrecip(day) { return meanDayValue(day, "precipGfsMm", "precipEcmwfMm"); }
+function dayWind(day) { return meanDayValue(day, "summitWindGfsKph", "summitWindEcmwfKph"); }
+function distancePenalty(value, ideal, tolerance, weight = 1) { if (typeof value !== "number" || typeof ideal !== "number") return 0; const delta = Math.abs(value - ideal); return Math.max(0, delta - tolerance) * weight; }
+function routeTypeLabel(climb) {
+  if (climb.routeType === "ski_corn") return "Corn-cycle ski objective";
+  if (climb.routeType === "pure_rock") return "Dry warm rock objective";
+  if (climb.routeType === "mixed_alpine_ice") return "Mixed alpine / ice objective";
+  return "General alpine objective";
+}
 function scoreWindowForDays(climb, forecastDays = []) {
   if (!climb || forecastDays.length === 0) return 0;
   const t = climb.thresholds || {};
+  const routeType = climb.routeType || "general_alpine";
   const windThreshold = t.maxSummitWindKph ?? 35;
   const dailyPrecipThreshold = t.maxPrecipMm24h ?? 2;
   const maxPrecip3Day = t.maxPrecipMm3Day ?? dailyPrecipThreshold * forecastDays.length;
-  const windPenalty = forecastDays.reduce((s, d) => s + Math.max(0, (((d.summitWindGfsKph || 0) + (d.summitWindEcmwfKph || 0)) / 2 - windThreshold) * (t.windPenaltyPerKph ?? 0.08)), 0);
-  const dailyPrecipPenalty = forecastDays.reduce((s, d) => s + Math.max(0, (((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2 - dailyPrecipThreshold) * (t.precipPenaltyPerMm ?? 0.5)), 0);
-  const cumulativePrecip = forecastDays.reduce((s, d) => s + ((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2, 0);
+  const cumulativePrecip = forecastDays.reduce((s, d) => s + dayPrecip(d), 0);
+  const windPenalty = forecastDays.reduce((s, d) => s + Math.max(0, (dayWind(d) - windThreshold) * (t.windPenaltyPerKph ?? 0.08)), 0);
+  const dailyPrecipPenalty = forecastDays.reduce((s, d) => s + Math.max(0, (dayPrecip(d) - dailyPrecipThreshold) * (t.precipPenaltyPerMm ?? 0.5)), 0);
   const cumulativePrecipPenalty = Math.max(0, (cumulativePrecip - maxPrecip3Day) * (t.precipPenaltyPerMm ?? 0.5));
-  const freezingPenalty = forecastDays.reduce((s, d) => s + ((d.freezingLevelM < (t.minFreezingLevelM ?? 0) || d.freezingLevelM > (t.maxFreezingLevelM ?? 9999)) ? 0.8 : 0), 0);
-  const coldPenalty = forecastDays.reduce((s, d) => { if (typeof t.minSummitTempC !== "number" || t.rockDryObjective) return s; const temp = ((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2; const ideal = t.idealSummitTempMinC ?? t.minSummitTempC; if (temp < t.minSummitTempC) return s + Math.min(3.5, (t.minSummitTempC - temp) * (t.coldSummitPenaltyPerC ?? 0.2) + 1.2); if (temp < ideal) return s + Math.min(1.5, (ideal - temp) * (t.coldSummitPenaltyPerC ?? 0.2)); return s; }, 0);
-  const dryRockPenalty = t.rockDryObjective ? forecastDays.reduce((s, d) => { const precip = ((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2; const summitTemp = ((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2; const valleyTemp = ((d.valleyTempGfsC || 0) + (d.valleyTempEcmwfC || 0)) / 2; let p = 0; if (precip > 0) p += 1.2 + precip * 0.8; if (summitTemp < (t.minSummitTempC ?? 0)) p += Math.min(3, Math.abs(summitTemp - (t.minSummitTempC ?? 0)) * 0.8 + 1); if (valleyTemp < (t.idealValleyTempC ?? 30)) p += Math.min(2, ((t.idealValleyTempC ?? 30) - valleyTemp) * 0.12); return s + p; }, 0) : 0;
-  const cornPenalty = t.skiCornObjective ? forecastDays.reduce((s, d) => { const midTemp = ((d.midTempGfsC || 0) + (d.midTempEcmwfC || 0)) / 2; const summitTemp = ((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2; const precip = ((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2; let p = 0; if ((d.pressureHpa || 0) < (t.idealPressureHpa ?? 1020)) p += 0.35; if (midTemp < (t.idealMidTempMinC ?? -4)) p += 0.6; if (midTemp > (t.idealMidTempMaxC ?? 4)) p += 0.6; if (summitTemp > (t.idealSummitTempMaxC ?? 1)) p += 0.5; if (precip > 0.5) p += 0.4; return s + p; }, 0) : 0;
-  const strictPrecipPenalty = t.strictNoPrecip && cumulativePrecip > 0 ? 0.6 : 0;
-  return clampScore(10 - windPenalty - dailyPrecipPenalty - cumulativePrecipPenalty - freezingPenalty - coldPenalty - dryRockPenalty - cornPenalty - strictPrecipPenalty);
+  const strictPrecipPenalty = t.strictNoPrecip && cumulativePrecip > 0 ? 0.8 + cumulativePrecip * 0.35 : 0;
+  let routePenalty = 0;
+
+  if (routeType === "ski_corn") {
+    // Goal: overnight freeze, clear/high pressure, then freezing level rises to near the summit without blowing far above it.
+    routePenalty += forecastDays.reduce((s, d) => {
+      const summitTemp = daySummitTemp(d);
+      const midTemp = dayMidTemp(d);
+      const freezingLevel = d.freezingLevelM || 0;
+      let p = 0;
+      if ((d.pressureHpa || 0) < (t.idealPressureHpa ?? 1018)) p += 0.5;
+      p += distancePenalty(freezingLevel, t.idealFreezingLevelM ?? climb.summitM, 350, 0.0015);
+      if (freezingLevel > (t.maxFreezingLevelM ?? climb.summitM + 400)) p += 1.2 + (freezingLevel - (t.maxFreezingLevelM ?? climb.summitM + 400)) * 0.001;
+      if (freezingLevel < (t.minFreezingLevelM ?? climb.summitM - 1200)) p += 0.8;
+      if (summitTemp > (t.idealSummitTempMaxC ?? 2)) p += 0.9 + (summitTemp - (t.idealSummitTempMaxC ?? 2)) * 0.25;
+      if (summitTemp < (t.idealSummitTempMinC ?? -10)) p += Math.min(1.2, ((t.idealSummitTempMinC ?? -10) - summitTemp) * 0.12);
+      if (midTemp < (t.idealMidTempMinC ?? -4)) p += 0.6;
+      if (midTemp > (t.idealMidTempMaxC ?? 5)) p += 0.6;
+      return s + p;
+    }, 0);
+  } else if (routeType === "pure_rock") {
+    // Goal: dry, clear, warm rock. Freezing level should be above summit and summit temps should be above freezing.
+    routePenalty += forecastDays.reduce((s, d) => {
+      const summitTemp = daySummitTemp(d);
+      const valleyTemp = dayValleyTemp(d);
+      const precip = dayPrecip(d);
+      const freezingLevel = d.freezingLevelM || 0;
+      let p = 0;
+      if (precip > 0) p += 1.5 + precip * (t.precipPenaltyPerMm ?? 1.0);
+      if (summitTemp < (t.minSummitTempC ?? 0)) p += 2.5 + Math.abs(summitTemp - (t.minSummitTempC ?? 0)) * 0.7;
+      if (summitTemp < (t.idealSummitTempC ?? 6)) p += Math.max(0, ((t.idealSummitTempC ?? 6) - summitTemp) * 0.18);
+      if (freezingLevel < (t.minFreezingLevelM ?? climb.summitM + 100)) p += 1.5;
+      if (valleyTemp < (t.idealValleyTempC ?? 25)) p += Math.min(1.5, ((t.idealValleyTempC ?? 25) - valleyTemp) * 0.08);
+      return s + p;
+    }, 0);
+  } else if (routeType === "mixed_alpine_ice") {
+    // Goal: clear weather, low precip, manageable wind, and a freeze/refreeze without extreme cold or sloppy heat.
+    routePenalty += forecastDays.reduce((s, d) => {
+      const summitTemp = daySummitTemp(d);
+      const freezingLevel = d.freezingLevelM || 0;
+      let p = 0;
+      if (summitTemp < (t.minSummitTempC ?? -18)) p += 1.0 + ((t.minSummitTempC ?? -18) - summitTemp) * 0.18;
+      if (typeof t.maxSummitTempC === "number" && summitTemp > t.maxSummitTempC) p += 1.0 + (summitTemp - t.maxSummitTempC) * 0.3;
+      if (freezingLevel > (t.maxFreezingLevelM ?? climb.summitM + 300)) p += 1.0;
+      if (freezingLevel < (t.minFreezingLevelM ?? climb.summitM - 1200)) p += 0.4;
+      if (typeof t.idealFreezingLevelM === "number") p += distancePenalty(freezingLevel, t.idealFreezingLevelM, 700, 0.0008);
+      return s + p;
+    }, 0);
+  } else {
+    routePenalty += forecastDays.reduce((s, d) => s + ((d.freezingLevelM < (t.minFreezingLevelM ?? 0) || d.freezingLevelM > (t.maxFreezingLevelM ?? 9999)) ? 0.8 : 0), 0);
+  }
+
+  return clampScore(10 - windPenalty - dailyPrecipPenalty - cumulativePrecipPenalty - strictPrecipPenalty - routePenalty);
 }
 function scoreWindow(climb, forecast = []) { return scoreWindowForDays(climb, forecast.slice(0, 3)); }
 function scoreConfidence(history = [], forecast = [], startIndex = 0) { const recent = history.slice(-4); const modelWindow = forecast.slice(startIndex, startIndex + 5); const modelSpread = avg(modelWindow.map((d) => d.modelStats ? d.modelStats.windSpreadKph + d.modelStats.precipSpreadMm * 4 + d.modelStats.tempSpreadC * 1.5 : Math.abs((d.summitWindGfsKph || 0) - (d.summitWindEcmwfKph || 0)) + Math.abs((d.precipGfsMm || 0) - (d.precipEcmwfMm || 0)) * 4 + Math.abs((d.summitTempGfsC || 0) - (d.summitTempEcmwfC || 0)) * 1.5)); const historyBonus = recent.length ? 0.8 : 0; return clampScore(8.2 + historyBonus - modelSpread * 0.08 - startIndex * 0.35); }
@@ -99,7 +161,11 @@ function classifyPattern(history = [], forecast = []) { if (!history.length || f
 
 function runTests() {
   const robson = climbs[0];
+  const sirD = climbs.find((c) => c.id === "sir-donald-nw-ridge");
+  const adams = climbs.find((c) => c.id === "adams-sw-chutes");
   console.assert(scoreWindowForDays(robson, [{ summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }, { summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }, { summitWindGfsKph: 5, summitWindEcmwfKph: 5, summitTempGfsC: -30, summitTempEcmwfC: -30, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3600, pressureHpa: 1030 }]) < 7, "Robson -30C should not score as strong");
+  console.assert(scoreWindowForDays(sirD, [{ summitWindGfsKph: 10, summitWindEcmwfKph: 10, summitTempGfsC: -1, summitTempEcmwfC: -1, valleyTempGfsC: 18, valleyTempEcmwfC: 18, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 2900, pressureHpa: 1025 }]) < 6, "Pure rock below-freezing summit should score poorly");
+  console.assert(scoreWindowForDays(adams, [{ summitWindGfsKph: 10, summitWindEcmwfKph: 10, summitTempGfsC: -2, summitTempEcmwfC: -2, midTempGfsC: 1, midTempEcmwfC: 1, precipGfsMm: 0, precipEcmwfMm: 0, freezingLevelM: 3700, pressureHpa: 1024 }]) > 7, "Corn objective should reward freezing level near summit with clear high pressure");
   console.assert(findBestUpcomingWindow(robson, [], []).label === "NO DATA", "No forecast should return NO DATA window");
   console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gfs_hrrr"), climbs.find((c) => c.id === "adams-sw-chutes")), "HRRR should apply to US objectives");
   console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gem_hrdps_continental"), climbs.find((c) => c.id === "robson-kain")), "HRDPS should apply to Canadian objectives");
@@ -174,8 +240,9 @@ export default function MountainWindowApp() {
   const pattern = useMemo(() => hasLiveData ? classifyPattern(history, forecast) : "NO DATA", [history, forecast, hasLiveData]);
   const recommendation = useMemo(() => {
     if (!hasLiveData) return "NO DATA — live weather could not be retrieved. Do not use this tool for decision making.";
-    if (climb.id === "sir-donald-nw-ridge" && bestWindow.quality >= 7) return `Sir Donald watch: ${bestWindow.label} is the better dry-rock signal. Require no precip and summit temperatures above freezing.`;
-    if (climb.id === "adams-sw-chutes" && bestWindow.quality >= 7.5) return `SW Chutes watch: ${bestWindow.label} may have the better corn-cycle signal. Look for clear sky, light wind, overnight refreeze, and controlled daytime softening.`;
+    if (climb.routeType === "pure_rock" && bestWindow.quality >= 7) return `${climb.name}: ${bestWindow.label} is the better dry-rock signal. Require no precip, warm rock, and freezing levels above the summit.`;
+    if (climb.routeType === "ski_corn" && bestWindow.quality >= 7.5) return `${climb.name}: ${bestWindow.label} may have the better corn-cycle signal. Look for overnight refreeze, freezing level rising close to the summit, light wind, and controlled daytime softening.`;
+    if (climb.routeType === "mixed_alpine_ice" && bestWindow.quality >= 7) return `${climb.name}: ${bestWindow.label} may be a mixed alpine window. Look for clear weather, low precip, manageable wind, and a good overnight freeze without extreme summit cold.`;
     if (bestWindow.leadDays >= 6 && bestWindow.quality >= 8 && bestWindow.confidence >= 5.5) return `Early signal: a strong ${bestWindow.label} window may be forming. Watch closely but do not commit yet.`;
     if (mode === "winter" && avalanche.riskScore >= 7) return "Weather may be improving, but avalanche context is still a primary constraint. Manual bulletin review required.";
     if (windowQuality >= 8 && bestWindow.confidence >= 7) return "Potential window forming. Next 48–72 hours deserve close manual review.";
@@ -187,7 +254,7 @@ export default function MountainWindowApp() {
 
   return <div className="min-h-screen bg-slate-50 p-4 md:p-8"><div className="mx-auto max-w-7xl space-y-6">
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><div className="flex items-center gap-2 text-sm font-medium text-slate-600"><MountainIcon /> Mountain Window Intelligence</div><h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">Weather + Avalanche Window Prototype</h1><p className="mt-2 max-w-3xl text-slate-600">Decision-support dashboard for alpine climbing and ski mountaineering windows. Weather data now comes through backend routes using direct national-model feeds via Open-Meteo, requested at the objective summit elevation where supported. If live weather data fails, scoring is disabled and NO DATA is shown.</p></div><div className="flex flex-col gap-2 sm:flex-row"><SelectBox className="w-[280px]" value={climbId} onChange={(v) => { setClimbId(v); if (v === "map") setTab("map"); }} options={[{ value: "map", label: "Select from map…" }, ...climbs.map((c) => ({ value: c.id, label: c.name }))]} /><SelectBox className="w-[180px]" value={mode} onChange={setMode} options={[{ value: "summer", label: "Summer alpine" }, { value: "winter", label: "Winter / ski" }]} /></div></div>
-    <Card><CardContent className="p-5"><div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><div><h2 className="text-xl font-semibold text-slate-950">{climb.name}</h2><p className="text-sm text-slate-600">{climb.region} · {climb.summitM} m · {climb.lat.toFixed(3)}, {climb.lon.toFixed(3)} · {climb.style}</p></div><div className="flex flex-wrap gap-2"><Badge variant="secondary">Pattern: {pattern}</Badge><Badge variant="secondary">Best watch: {bestWindow.label}</Badge><Badge variant="outline">Mode: {mode}</Badge><Badge>Manual review required</Badge><button onClick={() => setRefreshCount((n) => n + 1)} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">{weatherState.loading ? "Loading…" : "Refresh live forecast"}</button></div></div></CardContent></Card>
+    <Card><CardContent className="p-5"><div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><div><h2 className="text-xl font-semibold text-slate-950">{climb.name}</h2><p className="text-sm text-slate-600">{climb.region} · {climb.summitM} m · {climb.lat.toFixed(3)}, {climb.lon.toFixed(3)} · {climb.style} · {routeTypeLabel(climb)}</p></div><div className="flex flex-wrap gap-2"><Badge variant="secondary">Pattern: {pattern}</Badge><Badge variant="secondary">Best watch: {bestWindow.label}</Badge><Badge variant="outline">Mode: {mode}</Badge><Badge>Manual review required</Badge><button onClick={() => setRefreshCount((n) => n + 1)} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">{weatherState.loading ? "Loading…" : "Refresh live forecast"}</button></div></div></CardContent></Card>
     <div className="grid gap-4 md:grid-cols-5"><MetricCard icon={SunIcon} label="Immediate Window" value={hasLiveData ? `${windowQuality.toFixed(1)} / 10` : "NO DATA"} detail="Next 72 hrs only" className={scoreColor(windowQuality)} /><MetricCard icon={TrendIcon} label="Best Upcoming Window" value={hasLiveData ? `${bestWindow.quality.toFixed(1)} / 10` : "NO DATA"} detail={hasLiveData ? `${bestWindow.label} · ${bestWindow.leadDays} days lead` : "NO DATA"} className={scoreColor(bestWindow.quality)} /><MetricCard icon={GaugeIcon} label="Forecast Confidence" value={hasLiveData ? `${bestWindow.confidence.toFixed(1)} / 10` : "NO DATA"} detail="Lead-time penalty + model spread" className={scoreColor(bestWindow.confidence)} /><MetricCard icon={ShieldIcon} label="Avalanche Risk Context" value={hasAvalancheData ? `${avalanche.riskScore.toFixed(1)} / 10` : "NO LIVE DATA"} detail={mode === "winter" ? avalanche.headline : "Hidden in summer mode"} className={scoreColor(avalanche.riskScore, true)} /><MetricCard icon={TrendIcon} label="Pattern State" value={hasLiveData ? pattern : "NO DATA"} detail="Lookback + forecast" /></div>
     <Card><CardContent className="p-5"><div className="flex gap-3"><AlertIcon className="mt-1 h-5 w-5 text-amber-600" /><div><h3 className="font-semibold text-slate-950">Interpretation</h3><p className="mt-1 text-slate-700">{recommendation}</p><p className="mt-2 text-sm text-slate-500">The app alerts on “possible window forming,” not “safe to go.” Final decisions require human review of route conditions, observations, avalanche problems, glacier hazards, and team capability.</p></div></div></CardContent></Card>
     {!hasLiveData && <div className="rounded-2xl border border-red-500 bg-red-50 p-6 text-sm text-red-900"><strong>DATA ERROR — DO NOT USE THIS TOOL</strong><div className="mt-2">{weatherState.error || "Live weather data could not be retrieved."}</div><div className="mt-2">All scoring, windows, and recommendations are disabled.</div></div>}
@@ -199,6 +266,6 @@ export default function MountainWindowApp() {
     {tab === "avalanche" && <div className="grid gap-4 lg:grid-cols-3"><Card className="lg:col-span-2"><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SnowIcon /> Live avalanche bulletin</h3>{!hasAvalancheData && <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900"><strong>NO LIVE AVALANCHE DATA IN SCORING</strong><div className="mt-2">{avalancheState.error || avalanche.headline}</div></div>}{hasAvalancheData && <><div className="mb-3 text-sm text-slate-600">Source: {avalancheState.data?.source}</div><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-3">Valid / Issued</th><th className="p-3">Alpine</th><th className="p-3">Treeline</th><th className="p-3">Problems</th><th className="p-3">Summary</th></tr></thead><tbody>{avalancheHistory.map((d) => <tr key={d.label} className="border-t"><td className="p-3 font-medium">{d.label}</td><td className="p-3"><DangerBadge rating={d.alpine || 0} /></td><td className="p-3"><DangerBadge rating={d.treeline || 0} /></td><td className="p-3">{(d.problems || []).join(", ") || "—"}</td><td className="p-3 text-slate-600">{d.note}</td></tr>)}</tbody></table></div></>}</CardContent></Card><Card><CardContent className="space-y-4 p-5"><h3 className="font-semibold">Avalanche summary</h3><div><div className="text-sm text-slate-500">Current alpine rating</div><div className="mt-1"><DangerBadge rating={avalanche.last?.alpine || 0} /></div></div><p className="text-sm text-slate-700">{avalanche.headline}</p>{avalancheState.loading && <p className="text-xs text-slate-500">Loading avalanche feed…</p>}</CardContent></Card></div>}
     {tab === "alerts" && <AlertRulePanel climb={climb} mode={mode} setMode={setMode} />}
     {tab === "map" && <MapPickerPlaceholder onSelect={(id) => { setClimbId(id); setTab("forecast"); }} />}
-    {tab === "logic" && <Card><CardContent className="space-y-5 p-5"><h3 className="font-semibold">How this version handles data failures</h3><p className="text-slate-600">Backend failures are displayed as NO DATA and do not throw runtime errors in the UI. Fake seeded weather and fake avalanche bulletins are not used for decision making.</p><p className="text-slate-600">Short-range model gaps are displayed as gaps/unavailable, not zero wind, zero temperature, or zero pressure.</p></CardContent></Card>}
+    {tab === "logic" && <Card><CardContent className="space-y-5 p-5"><h3 className="font-semibold">How this version scores route types</h3><p className="text-slate-600"><strong>Corn-cycle ski objectives</strong> reward overnight freeze, high pressure, light wind, low precip, and a freezing level rising close to the summit without blasting far above it.</p><p className="text-slate-600"><strong>Pure rock objectives</strong> heavily reward dry, clear, warm weather with freezing levels above the summit and penalize any precip or below-freezing summit temperatures.</p><p className="text-slate-600"><strong>Mixed alpine / ice objectives</strong> reward clear weather, low precip, manageable wind, and a useful freeze/refreeze while penalizing both extreme cold and sloppy warm conditions.</p><p className="text-slate-600">Backend failures are displayed as NO DATA. Short-range model gaps are displayed as gaps/unavailable, not zero wind, zero temperature, or zero pressure.</p></CardContent></Card>}
   </div></div>;
 }
