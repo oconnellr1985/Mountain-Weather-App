@@ -256,24 +256,111 @@ function estimateHighAtElevation(day, elevationM, climb) {
   const summitHigh = typeof day.summitTempMaxAvgC === "number" ? day.summitTempMaxAvgC : daySummitTemp(day) + 3;
   return summitHigh + ((climb.summitM - elevationM) / 1000) * 6.5;
 }
+function degToRad(v) { return v * Math.PI / 180; }
+function radToDeg(v) { return v * 180 / Math.PI; }
+function saturationVaporPressureHpa(tC) { return 6.112 * Math.exp((17.67 * tC) / (tC + 243.5)); }
+function pressureAtElevationHpa(elevationM) { return 1013.25 * Math.pow(1 - 2.25577e-5 * elevationM, 5.25588); }
+function wetBulbApproxC(tC, rhPct) {
+  const rh = Math.max(1, Math.min(100, rhPct || 70));
+  // Stull-style closed-form wet bulb approximation, close enough for browser-side timing guidance.
+  return tC * Math.atan(0.151977 * Math.sqrt(rh + 8.313659)) + Math.atan(tC + rh) - Math.atan(rh - 1.676331) + 0.00391838 * Math.pow(rh, 1.5) * Math.atan(0.023101 * rh) - 4.686035;
+}
+function estimateSolarPosition(lat, lon, dateObj, hour) {
+  const start = new Date(Date.UTC(dateObj.getUTCFullYear(), 0, 0));
+  const dayOfYear = Math.floor((dateObj - start) / 86400000);
+  const b = (2 * Math.PI / 365) * (dayOfYear - 81);
+  const decl = degToRad(23.45 * Math.sin(b));
+  const eot = 9.87 * Math.sin(2 * b) - 7.53 * Math.cos(b) - 1.5 * Math.sin(b);
+  const lst = hour + lon / 15 + eot / 60;
+  const omega = degToRad(15 * (lst - 12));
+  const phi = degToRad(lat);
+  const sinElev = Math.sin(phi) * Math.sin(decl) + Math.cos(phi) * Math.cos(decl) * Math.cos(omega);
+  const elevationRad = Math.asin(Math.max(-1, Math.min(1, sinElev)));
+  const cosAz = (Math.sin(decl) - Math.sin(elevationRad) * Math.sin(phi)) / Math.max(0.0001, Math.cos(elevationRad) * Math.cos(phi));
+  let az = radToDeg(Math.acos(Math.max(-1, Math.min(1, cosAz))));
+  if (omega > 0) az = 360 - az;
+  return { elevationDeg: radToDeg(elevationRad), azimuthDeg: az };
+}
+function aspectToDegrees(aspect = "S") {
+  const a = String(aspect).toUpperCase();
+  if (a.includes("SW")) return 225;
+  if (a.includes("SE")) return 135;
+  if (a.includes("NW")) return 315;
+  if (a.includes("NE")) return 45;
+  if (a.includes("N")) return 0;
+  if (a.includes("E")) return 90;
+  if (a.includes("W")) return 270;
+  return 180;
+}
+function calculateRadiativeEquivalentC({ airTempC, rhPct, cloudFraction, lat, lon, dateObj, hour, slopeDeg, aspectDeg }) {
+  const solar = estimateSolarPosition(lat, lon, dateObj, hour);
+  const alpha = degToRad(Math.max(0, solar.elevationDeg));
+  const beta = degToRad(slopeDeg || 30);
+  const gammaS = degToRad(solar.azimuthDeg);
+  const gammaA = degToRad(aspectDeg || 180);
+  const cosI = Math.max(0, Math.cos(beta) * Math.sin(alpha) + Math.sin(beta) * Math.cos(alpha) * Math.cos(gammaS - gammaA));
+  const cloud = Math.max(0, Math.min(1, cloudFraction ?? 0.35));
+  const albedo = 0.62;
+  const kRad = 8.0;
+  const swNet = 1361 * cosI * (1 - 0.65 * cloud * cloud) * (1 - albedo);
+  const tAirK = airTempC + 273.15;
+  const tSnowK = 273.15;
+  const ea = saturationVaporPressureHpa(airTempC) * Math.max(1, Math.min(100, rhPct || 70)) / 100;
+  const epsClear = 0.51 + 0.066 * Math.sqrt(Math.max(0, ea));
+  const epsAtm = (1 - cloud) * epsClear + cloud;
+  const svf = Math.pow(Math.cos(beta / 2), 2);
+  const sigma = 5.67e-8;
+  const lwNet = sigma * (svf * epsAtm * Math.pow(tAirK, 4) + (1 - svf) * 0.98 * Math.pow(tAirK, 4) - Math.pow(tSnowK, 4));
+  return { shortwaveEqC: swNet / kRad, longwaveEqC: lwNet / kRad, solarElevationDeg: solar.elevationDeg, cosIncidence: cosI };
+}
+function cornDensityForClimb(climb) {
+  if (climb.id === "rainier-fuhrer-finger" || climb.id === "adams-sw-chutes") return 0.48;
+  if (climb.id === "shuksan-north-face" || climb.id === "north-twin-north-face") return 0.42;
+  return 0.38;
+}
+function cornThresholdsForDensity(rho) {
+  const density = Math.max(0.3, Math.min(0.55, rho || 0.4));
+  const kM = 2.0 * density + 0.1;
+  const kF = 10.0 * density + 0.5;
+  const startFhrs = 133.33 * density + 13.34;
+  const dMaxCm = Math.max(0.5, 9.27 * density - 1.58);
+  const endFhrs = (dMaxCm * 43.2) / kM;
+  return { density, kM, kF, startFhrs, endFhrs, dMaxCm };
+}
 function makeCornHourly(day, climb, elevationM, kind) {
+  const profile = routeElevationProfile(climb);
   const low = estimateLowAtElevation(day, elevationM, climb);
   const high = estimateHighAtElevation(day, elevationM, climb);
-  const pressureBonus = (day.pressureHpa || 1013) >= 1018 ? 0.8 : 0;
   const precip = dayPrecip(day);
   const wind = dayWind(day);
-  const solarBoost = kind === "entrance" ? 0.7 : 1.1;
+  const rh = day.rhPct ?? day.relativeHumidityPct ?? 70;
+  const cloud = Math.max(0, Math.min(1, (day.cloudCoverPct ?? day.cloudPct ?? 35) / 100));
+  const rho = cornDensityForClimb(climb);
+  const thresholds = cornThresholdsForDensity(rho);
+  const dateObj = day.date ? new Date(`${day.date}T12:00:00Z`) : new Date();
+  let meltFhrs = 0;
+  let freezeFhrs = 0;
   return Array.from({ length: 16 }, (_, idx) => {
     const hour = idx + 5;
     const dayCurve = Math.sin(Math.max(0, Math.min(Math.PI, ((hour - 6) / 12) * Math.PI)));
-    const temp = low + (high - low) * dayCurve;
-    const effective = temp + dayCurve * solarBoost + pressureBonus - Math.max(0, wind - 25) * 0.035 - precip * 0.5;
-    const meltIntegral = Math.max(0, effective) * Math.max(0, hour - 6) * 0.35;
+    const airTempC = low + (high - low) * dayCurve;
+    const wetBulbC = wetBulbApproxC(airTempC, rh);
+    const radiative = calculateRadiativeEquivalentC({ airTempC, rhPct: rh, cloudFraction: cloud, lat: climb.lat, lon: climb.lon, dateObj, hour, slopeDeg: profile.slopeDeg, aspectDeg: aspectToDegrees(profile.aspect) });
+    const windCoolingC = Math.max(0, wind - 20) * 0.035;
+    const precipCoolingC = precip * 0.35;
+    const effectiveTempC = wetBulbC + radiative.shortwaveEqC + radiative.longwaveEqC - windCoolingC - precipCoolingC;
+    const effectiveF = effectiveTempC * 9 / 5 + 32;
+    if (effectiveF > 32) meltFhrs += effectiveF - 32;
+    if (effectiveF < 32) freezeFhrs += 32 - effectiveF;
+    const meltCdays = meltFhrs / 43.2;
+    const freezeCdays = freezeFhrs / 43.2;
+    const meltDepthCm = thresholds.kM * meltCdays;
+    const refreezeDepthCm = thresholds.kF * Math.sqrt(Math.max(0, freezeCdays));
     let state = "Frozen";
-    if (effective >= -0.5 && effective <= 3.5 && meltIntegral >= 1 && meltIntegral <= 12) state = "Prime corn";
-    if (effective > 3.5 || meltIntegral > 12) state = "Too soft / wet";
-    if (effective < -0.5 && hour >= 11) state = "Icy / delayed";
-    return { hour, label: `${hour}:00`, effectiveTempC: Number(effective.toFixed(1)), airTempC: Number(temp.toFixed(1)), meltIntegral: Number(meltIntegral.toFixed(1)), state };
+    if (meltFhrs >= thresholds.startFhrs && meltFhrs <= thresholds.endFhrs && effectiveTempC >= -0.25 && refreezeDepthCm >= 0.5) state = "Prime corn";
+    if (meltFhrs > thresholds.endFhrs || meltDepthCm > thresholds.dMaxCm || effectiveTempC > 5) state = "Too soft / wet";
+    if (effectiveTempC < -0.25 && hour >= 10) state = "Icy / delayed";
+    return { hour, label: `${hour}:00`, effectiveTempC: Number(effectiveTempC.toFixed(1)), airTempC: Number(airTempC.toFixed(1)), wetBulbC: Number(wetBulbC.toFixed(1)), shortwaveEqC: Number(radiative.shortwaveEqC.toFixed(1)), longwaveEqC: Number(radiative.longwaveEqC.toFixed(1)), meltIntegralFhrs: Number(meltFhrs.toFixed(1)), freezeIntegralFhrs: Number(freezeFhrs.toFixed(1)), meltDepthCm: Number(meltDepthCm.toFixed(2)), refreezeDepthCm: Number(refreezeDepthCm.toFixed(2)), density: Number(rho.toFixed(2)), startThresholdFhrs: Number(thresholds.startFhrs.toFixed(1)), endThresholdFhrs: Number(thresholds.endFhrs.toFixed(1)), solarElevationDeg: Number(radiative.solarElevationDeg.toFixed(1)), state };
   });
 }
 function analyzeCornDay(climb, day) {
@@ -315,6 +402,7 @@ function CornCycleHeatmap({ title, elevationM, days = [], field = "entrance" }) 
   return <Card><CardContent className="p-5"><h3 className="mb-1 font-semibold">{title}</h3><p className="mb-4 text-sm text-slate-500">Elevation: {elevationM} m · 7-day view · green = estimated prime corn window.</p><div className="overflow-x-auto"><div className="min-w-[980px]"><div className="grid gap-1" style={{ gridTemplateColumns: "90px repeat(16, minmax(44px, 1fr))" }}><div></div>{hours.map((h) => <div key={h} className="text-center text-[10px] font-medium text-slate-500">{h}:00</div>)}{days.map((day) => <React.Fragment key={`${field}-${day.day.date || day.day.label}`}><div className="flex flex-col justify-center rounded-lg bg-slate-50 px-2 text-xs"><span className="font-semibold text-slate-900">{day.day.label}</span><span className="text-[10px] text-slate-500">{day.day.date}</span></div>{day[field].map((h) => <div key={`${day.day.label}-${field}-${h.hour}`} title={`${day.day.label} ${h.label}: ${h.state}; effective ${h.effectiveTempC}°C`} className={`h-12 rounded-md border p-1 text-center text-[9px] leading-tight ${cornCellClass(h.state)}`}><div className="font-semibold">{h.effectiveTempC}°</div><div className="truncate">{h.state === "Prime corn" ? "Prime" : h.state.includes("soft") ? "Wet" : h.state.includes("Icy") ? "Icy" : "Frozen"}</div></div>)}</React.Fragment>)}</div></div></div></CardContent></Card>;
 }
 function CornCycleCurveGraph({ title, elevationM, days = [], field = "entrance" }) {
+  const [hover, setHover] = useState(null);
   const width = 980, height = 260, pad = 34;
   const rows = days.flatMap((day, dayIndex) => day[field].map((h, hourIndex) => ({ ...h, dayIndex, hourIndex, dayLabel: day.day.label, date: day.day.date })));
   const temps = rows.map((r) => r.effectiveTempC).filter((v) => typeof v === "number" && Number.isFinite(v));
@@ -324,7 +412,18 @@ function CornCycleCurveGraph({ title, elevationM, days = [], field = "entrance" 
   const xFor = (dayIndex, hourIndex) => pad + ((dayIndex * 16 + hourIndex) / totalSlots) * (width - pad * 2);
   const yFor = (temp) => height - pad - ((temp - minT) / Math.max(1, maxT - minT)) * (height - pad * 2);
   const points = rows.map((r) => `${xFor(r.dayIndex, r.hourIndex)},${yFor(r.effectiveTempC)}`).join(" ");
-  return <Card><CardContent className="p-5"><h3 className="mb-1 font-semibold">{title}</h3><p className="mb-3 text-sm text-slate-500">Elevation: {elevationM} m · sinuous 7-day effective snow-temperature curve. Green vertical bands = estimated prime corn windows.</p><div className="overflow-x-auto"><svg viewBox={`0 0 ${width} ${height}`} className="min-w-[980px] w-full h-72 rounded-xl border bg-white"><line x1={pad} x2={width - pad} y1={yFor(0)} y2={yFor(0)} className="stroke-slate-400" strokeDasharray="5 5" /><text x={pad + 4} y={yFor(0) - 6} className="fill-slate-500 text-[11px]">0°C effective</text>{days.map((day, dayIndex) => <g key={`${field}-day-${day.day.label}`}><line x1={xFor(dayIndex, 0)} x2={xFor(dayIndex, 0)} y1={pad} y2={height - pad} className="stroke-slate-200" /><text x={xFor(dayIndex, 0) + 4} y={height - 10} className="fill-slate-500 text-[10px]">{day.day.label}</text></g>)}{rows.map((r) => r.state === "Prime corn" ? <rect key={`${field}-prime-${r.dayIndex}-${r.hourIndex}`} x={xFor(r.dayIndex, r.hourIndex) - 4} y={pad} width="8" height={height - pad * 2} className="fill-emerald-200 opacity-70" /> : null)}<polyline points={points} fill="none" className="stroke-slate-900" strokeWidth="3" vectorEffect="non-scaling-stroke" />{rows.filter((_, i) => i % 4 === 0).map((r) => <circle key={`${field}-dot-${r.dayIndex}-${r.hourIndex}`} cx={xFor(r.dayIndex, r.hourIndex)} cy={yFor(r.effectiveTempC)} r="2.5" className={r.state === "Prime corn" ? "fill-emerald-600" : r.state.includes("soft") ? "fill-orange-500" : r.state.includes("Icy") ? "fill-blue-500" : "fill-slate-400"} />)}</svg></div><div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-600"><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-emerald-200" />Prime corn band</span><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-blue-300" />Icy/delayed</span><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-orange-300" />Too soft/wet</span></div></CardContent></Card>;
+  function handleMove(e) {
+    if (!rows.length) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * width;
+    const ratio = Math.max(0, Math.min(1, (x - pad) / (width - pad * 2)));
+    const index = Math.round(ratio * totalSlots);
+    const row = rows[Math.max(0, Math.min(rows.length - 1, index))];
+    setHover(row);
+  }
+  const hoverX = hover ? xFor(hover.dayIndex, hover.hourIndex) : null;
+  const hoverY = hover ? yFor(hover.effectiveTempC) : null;
+  return <Card><CardContent className="p-5"><h3 className="mb-1 font-semibold">{title}</h3><p className="mb-3 text-sm text-slate-500">Elevation: {elevationM} m · 7-day Ullr-style effective snow-temperature curve. Green vertical bands = calculated prime corn windows.</p><div className="relative overflow-x-auto"><svg viewBox={`0 0 ${width} ${height}`} className="min-w-[980px] w-full h-72 rounded-xl border bg-white cursor-crosshair" onMouseMove={handleMove} onMouseLeave={() => setHover(null)}><line x1={pad} x2={width - pad} y1={yFor(0)} y2={yFor(0)} className="stroke-slate-400" strokeDasharray="5 5" /><text x={pad + 4} y={yFor(0) - 6} className="fill-slate-500 text-[11px]">0°C effective</text>{days.map((day, dayIndex) => <g key={`${field}-day-${day.day.label}`}><line x1={xFor(dayIndex, 0)} x2={xFor(dayIndex, 0)} y1={pad} y2={height - pad} className="stroke-slate-200" /><text x={xFor(dayIndex, 0) + 4} y={height - 10} className="fill-slate-500 text-[10px]">{day.day.label}</text></g>)}{rows.map((r) => r.state === "Prime corn" ? <rect key={`${field}-prime-${r.dayIndex}-${r.hourIndex}`} x={xFor(r.dayIndex, r.hourIndex) - 4} y={pad} width="8" height={height - pad * 2} className="fill-emerald-200 opacity-70" /> : null)}<polyline points={points} fill="none" className="stroke-slate-900" strokeWidth="3" vectorEffect="non-scaling-stroke" />{rows.map((r, i) => <circle key={`${field}-dot-${r.dayIndex}-${r.hourIndex}`} cx={xFor(r.dayIndex, r.hourIndex)} cy={yFor(r.effectiveTempC)} r={i % 2 === 0 ? "2.5" : "1.8"} className={r.state === "Prime corn" ? "fill-emerald-600" : r.state.includes("soft") ? "fill-orange-500" : r.state.includes("Icy") ? "fill-blue-500" : "fill-slate-400"} />)}{hover && <g><line x1={hoverX} x2={hoverX} y1={pad} y2={height - pad} className="stroke-slate-500" strokeDasharray="4 4" /><circle cx={hoverX} cy={hoverY} r="5" className="fill-white stroke-slate-900" strokeWidth="2" /></g>}</svg>{hover && <div className="pointer-events-none absolute left-4 top-4 max-w-xs rounded-xl border border-slate-200 bg-white/95 p-3 text-xs shadow-lg"><div className="mb-1 font-semibold text-slate-950">{hover.dayLabel} · {hover.date} · {hover.label}</div><div>State: <strong>{hover.state}</strong></div><div>Effective temp: <strong>{hover.effectiveTempC} °C</strong></div><div>Air / wet-bulb: <strong>{hover.airTempC} / {hover.wetBulbC} °C</strong></div><div>Melt integral: <strong>{hover.meltIntegralFhrs} F-hrs</strong></div><div>Refreeze depth: <strong>{hover.refreezeDepthCm} cm</strong></div><div>Melt depth: <strong>{hover.meltDepthCm} cm</strong></div><div>Solar elevation: <strong>{hover.solarElevationDeg}°</strong></div><div className="mt-1 text-slate-500">Prime threshold: {hover.startThresholdFhrs}–{hover.endThresholdFhrs} F-hrs</div></div>}</div><div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-600"><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-emerald-200" />Prime corn band</span><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-blue-300" />Icy/delayed</span><span className="inline-flex items-center gap-1"><span className="h-3 w-5 rounded bg-orange-300" />Too soft/wet</span></div></CardContent></Card>;
 }
 function CornCycleGraph({ title, elevationM, rows = [] }) {
   return <Card><CardContent className="p-5"><h3 className="mb-1 font-semibold">{title}</h3><p className="mb-4 text-sm text-slate-500">Elevation: {elevationM} m · green bands indicate estimated prime corn.</p><div className="grid grid-cols-16 gap-1">{rows.map((h) => <div key={h.hour} className={`rounded-lg border p-2 text-center text-[10px] ${h.state === "Prime corn" ? "border-emerald-400 bg-emerald-100 text-emerald-950" : h.state.includes("soft") ? "border-orange-300 bg-orange-50 text-orange-900" : h.state.includes("Icy") ? "border-blue-200 bg-blue-50 text-blue-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}><div className="font-semibold">{h.label}</div><div>{h.effectiveTempC}°C</div><div className="mt-1">{h.state}</div></div>)}</div></CardContent></Card>;
@@ -333,7 +432,7 @@ function CornCyclePanel({ climb, forecast }) {
   const analysis = analyzeCornCycle(climb, forecast);
   if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Corn-cycle analysis is only shown for ski-corn objectives with live forecast data.</div>;
   const bestDayLabel = `${analysis.day.label}${analysis.day.date ? ` · ${analysis.day.date}` : ""}`;
-  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-4"><MetricCard icon={SunIcon} label="Best 7-day Corn Score" value={`${analysis.cornScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.cornScore)} /><MetricCard icon={SnowIcon} label="Best Refreeze Score" value={`${analysis.refreezeScore.toFixed(1)} / 10`} detail="Overnight supportability" className={scoreColor(analysis.refreezeScore)} /><MetricCard icon={MountainIcon} label="Best Ski Entrance" value={analysis.targetSki ? `${analysis.targetSki}:00` : "No clear time"} detail={`${analysis.profile.entranceM} m · ${analysis.profile.aspect}`} /><MetricCard icon={TrendIcon} label="Best Exit Target" value={analysis.exitTarget ? `${analysis.exitTarget}:00` : "No clear time"} detail={`${analysis.profile.exitM} m lower route`} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day corn-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">Best-day strategy is based on {bestDayLabel}. The graphs and heatmaps compare the entrance/high point and the lower exit elevation across the next 7 forecast days. Green means the heuristic surface-state model estimates a prime corn window; blue is delayed/icy; orange is too soft/wet.</p></CardContent></Card><div className="grid gap-4"><CornCycleCurveGraph title="Entrance / high-point 7-day corn curve" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleCurveGraph title="Exit / lower-route 7-day corn curve" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /><CornCycleHeatmap title="Entrance / high-point corn heatmap" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleHeatmap title="Exit / lower-route corn heatmap" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /></div><Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Best-day route timing strategy — {bestDayLabel}</h3><div className="grid gap-3 md:grid-cols-4 text-sm"><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Start climbing</div><div className="text-xl font-semibold">{analysis.startClimb ? `${analysis.startClimb}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Reach entrance</div><div className="text-xl font-semibold">{analysis.targetSki ? `${Math.max(analysis.targetSki - 1, 6)}:00` : "—"}</div></div><div className="rounded-xl bg-emerald-50 p-3"><div className="text-emerald-700">Start skiing</div><div className="text-xl font-semibold text-emerald-900">{analysis.targetSki ? `${analysis.targetSki}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Clear lower route</div><div className="text-xl font-semibold">{analysis.exitTarget ? `${analysis.exitTarget}:00` : "—"}</div></div></div></CardContent></Card></div>;
+  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-4"><MetricCard icon={SunIcon} label="Best 7-day Corn Score" value={`${analysis.cornScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.cornScore)} /><MetricCard icon={SnowIcon} label="Best Refreeze Score" value={`${analysis.refreezeScore.toFixed(1)} / 10`} detail="Overnight supportability" className={scoreColor(analysis.refreezeScore)} /><MetricCard icon={MountainIcon} label="Best Ski Entrance" value={analysis.targetSki ? `${analysis.targetSki}:00` : "No clear time"} detail={`${analysis.profile.entranceM} m · ${analysis.profile.aspect}`} /><MetricCard icon={TrendIcon} label="Best Exit Target" value={analysis.exitTarget ? `${analysis.exitTarget}:00` : "No clear time"} detail={`${analysis.profile.exitM} m lower route`} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day corn-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">Best-day strategy is based on {bestDayLabel}. The graphs and heatmaps compare the entrance/high point and the lower exit elevation across the next 7 forecast days. Green means the Ullr-style surface-state model estimates a prime corn window; blue is delayed/icy; orange is too soft/wet. Hover over the curve for time, effective temp, melt/refreeze values, and surface-state interpretation.</p></CardContent></Card><div className="grid gap-4"><CornCycleCurveGraph title="Entrance / high-point 7-day corn curve" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleCurveGraph title="Exit / lower-route 7-day corn curve" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /><CornCycleHeatmap title="Entrance / high-point corn heatmap" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleHeatmap title="Exit / lower-route corn heatmap" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /></div><Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Best-day route timing strategy — {bestDayLabel}</h3><div className="grid gap-3 md:grid-cols-4 text-sm"><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Start climbing</div><div className="text-xl font-semibold">{analysis.startClimb ? `${analysis.startClimb}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Reach entrance</div><div className="text-xl font-semibold">{analysis.targetSki ? `${Math.max(analysis.targetSki - 1, 6)}:00` : "—"}</div></div><div className="rounded-xl bg-emerald-50 p-3"><div className="text-emerald-700">Start skiing</div><div className="text-xl font-semibold text-emerald-900">{analysis.targetSki ? `${analysis.targetSki}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Clear lower route</div><div className="text-xl font-semibold">{analysis.exitTarget ? `${analysis.exitTarget}:00` : "—"}</div></div></div></CardContent></Card></div>;
 }
 
 function AlertRulePanel({ climb, mode, setMode }) { const [emailEnabled, setEmailEnabled] = useState(true); const [smsEnabled, setSmsEnabled] = useState(false); const [email, setEmail] = useState(""); const [phone, setPhone] = useState(""); const [activeFrom, setActiveFrom] = useState(climb.activeFromMonth || 1); const [minQuality, setMinQuality] = useState(8); const [minConfidence, setMinConfidence] = useState(5.5); useEffect(() => { setActiveFrom(climb.activeFromMonth || 1); if (climb.defaultMode) setMode(climb.defaultMode); }, [climb.id]); const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]; async function sendTestAlert() { const message = `Mountain Window Test Alert: ${climb.name} ${mode} window watch. Quality threshold ${minQuality}, confidence threshold ${minConfidence}.`; try { const response = await fetch("/api/send-alert", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: emailEnabled ? email : "", phone: "", message }) }); const data = await response.json().catch(() => ({})); if (!response.ok || data.error) throw new Error(data.error || "Alert failed to send"); alert(`Test alert sent${data.id ? ` via Resend ID: ${data.id}` : "."}`); } catch (error) { alert(`Alert failed: ${error.message || "unknown error"}`); } } return <Card><CardContent className="p-5"><div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><div><h3 className="font-semibold">Objective-specific alert rule</h3><p className="text-sm text-slate-500">Manual test alerts can send by email through /api/send-alert. Automatic watch alerts are not active yet; they require saved alert rules plus the cron/check-alerts workflow.</p></div><Badge variant="secondary">Manual test only — no automatic alerts yet</Badge></div><div className="grid gap-4 md:grid-cols-3"><div><label className="mb-1 block text-xs font-medium text-slate-500">Objective</label><div className="rounded-xl border bg-slate-50 px-3 py-2 text-sm">{climb.name}</div></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Window type</label><SelectBox className="w-full" value={mode} onChange={setMode} options={[{ value: "summer", label: "Summer alpine" }, { value: "winter", label: "Winter / ski" }]} /></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Start watching</label><SelectBox className="w-full" value={String(activeFrom)} onChange={(v) => setActiveFrom(Number(v))} options={months.map((m, i) => ({ value: String(i + 1), label: m }))} /></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Minimum quality</label><input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" type="number" min="0" max="10" step="0.5" value={minQuality} onChange={(e) => setMinQuality(e.target.value)} /></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Minimum confidence</label><input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" type="number" min="0" max="10" step="0.5" value={minConfidence} onChange={(e) => setMinConfidence(e.target.value)} /></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Delivery methods</label><div className="flex flex-wrap gap-3 rounded-xl border bg-slate-50 px-3 py-2 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={emailEnabled} onChange={(e) => setEmailEnabled(e.target.checked)} /> Email</label><label className="flex items-center gap-2 text-slate-400"><input type="checkbox" checked={false} disabled /> Text disabled for now</label></div></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Email</label><input className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" value={email} onChange={(e) => setEmail(e.target.value)} /></div><div><label className="mb-1 block text-xs font-medium text-slate-500">Future SMS / app notification target</label><input className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-400" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Disabled for now" disabled /></div><div className="flex items-end"><Button className="w-full" onClick={sendTestAlert}>Send test alert</Button></div></div></CardContent></Card>; }
