@@ -65,13 +65,82 @@ async function fetchJsonSafe(url) {
   }
 }
 
+function isoDateOffset(daysOffset) {
+  const d = new Date();
+  d.setDate(d.getDate() + daysOffset);
+  return d.toISOString().slice(0, 10);
+}
+function estimateFreezingLevelFromSummitTemp(climb, summitTempMaxC) {
+  // Fallback when archive feed does not include freezing-level height. Uses standard lapse-rate from summit elevation.
+  return Math.max(0, Math.round(climb.summitM + (Number(summitTempMaxC || 0) / 6.5) * 1000));
+}
+function isCredibleHistory(history = []) {
+  if (!Array.isArray(history) || history.length < 7) return false;
+  const changingDates = new Set(history.map((d) => d.date)).size >= 7;
+  const variableTemps = new Set(history.map((d) => Number(historyTempMaxC(d)).toFixed(1))).size >= 3;
+  return changingDates && variableTemps;
+}
+async function fetchHistoricalLookbackFromOpenMeteo(climb) {
+  const daily = ["temperature_2m_min", "temperature_2m_max", "precipitation_sum", "rain_sum", "snowfall_sum", "wind_speed_10m_max", "pressure_msl_mean"].join(",");
+  const params = new URLSearchParams({
+    latitude: String(climb.lat),
+    longitude: String(climb.lon),
+    elevation: String(climb.summitM),
+    daily,
+    past_days: "14",
+    forecast_days: "1",
+    timezone: "auto",
+    wind_speed_unit: "kmh",
+    precipitation_unit: "mm",
+    temperature_unit: "celsius",
+  });
+  const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+  const result = await fetchJsonSafe(url);
+  if (!result.ok) return { ok: false, history: [], source: "NO REAL HISTORY", error: result.error };
+  const dailyData = result.data?.daily || {};
+  const times = dailyData.time || [];
+  const rows = times.slice(-14).map((date, i, arr) => {
+    const tempMin = dailyData.temperature_2m_min?.[times.indexOf(date)] ?? 0;
+    const tempMax = dailyData.temperature_2m_max?.[times.indexOf(date)] ?? 0;
+    const snowCm = dailyData.snowfall_sum?.[times.indexOf(date)] ?? 0;
+    const rainMm = dailyData.rain_sum?.[times.indexOf(date)] ?? 0;
+    const precipMm = dailyData.precipitation_sum?.[times.indexOf(date)] ?? 0;
+    const windKph = dailyData.wind_speed_10m_max?.[times.indexOf(date)] ?? 0;
+    const pressureHpa = dailyData.pressure_msl_mean?.[times.indexOf(date)] ?? 0;
+    return {
+      label: `D-${arr.length - i}`,
+      date,
+      observedSummitTempMinC: Number(tempMin),
+      observedSummitTempMaxC: Number(tempMax),
+      observedPrecipMm: Number(precipMm),
+      observedRainMm: Number(rainMm),
+      observedSnowCm: Number(snowCm),
+      observedWindKph: Number(windKph),
+      observedPressureHpa: Number(pressureHpa),
+      observedFreezingLevelM: estimateFreezingLevelFromSummitTemp(climb, tempMax),
+      freezingLevelEstimated: true,
+    };
+  });
+  if (!isCredibleHistory(rows)) return { ok: false, history: [], source: "NO REAL HISTORY", error: "Open-Meteo returned insufficient recent history." };
+  return { ok: true, history: rows, source: "Open-Meteo recent past daily data at objective summit elevation; freezing level estimated from summit high temp" };
+}
+
 async function fetchWeatherFromBackend(climb) {
   const url = `/api/weather?climbId=${encodeURIComponent(climb.id)}&lat=${climb.lat}&lon=${climb.lon}&summitM=${climb.summitM}&region=${encodeURIComponent(getObjectiveRegion(climb))}`;
   const result = await fetchJsonSafe(url);
-  if (!result.ok) return { ok: false, forecast: [], history: [], source: "NO DATA", unavailableModels: [], error: `Weather backend failed: ${result.error}` };
+  if (!result.ok) return { ok: false, forecast: [], history: [], historySource: "NO REAL HISTORY", source: "NO DATA", unavailableModels: [], error: `Weather backend failed: ${result.error}` };
   const data = result.data || {};
-  if (!Array.isArray(data.forecast) || data.forecast.length < 3) return { ok: false, forecast: [], history: [], source: data.source || "NO DATA", unavailableModels: data.unavailableModels || [], error: "Weather backend returned insufficient forecast data." };
-  return { ok: true, forecast: data.forecast, history: Array.isArray(data.history) ? data.history : [], source: data.source || "Weather backend", unavailableModels: data.unavailableModels || [], error: "" };
+  if (!Array.isArray(data.forecast) || data.forecast.length < 3) return { ok: false, forecast: [], history: [], historySource: "NO REAL HISTORY", source: data.source || "NO DATA", unavailableModels: data.unavailableModels || [], error: "Weather backend returned insufficient forecast data." };
+
+  // Always try to replace backend/synthetic lookback with a real recent-past data pull.
+  // If this fails, do not silently show placeholder history.
+  const realHistory = await fetchHistoricalLookbackFromOpenMeteo(climb);
+  const backendHistorySource = String(data.historySource || data.source || "");
+  const backendHistoryIsExplicitReal = /archive|open-meteo|observed|era5|histor/i.test(backendHistorySource) && isCredibleHistory(data.history);
+  const history = realHistory.ok ? realHistory.history : backendHistoryIsExplicitReal ? data.history : [];
+  const historySource = realHistory.ok ? realHistory.source : backendHistoryIsExplicitReal ? backendHistorySource : `NO REAL HISTORY — ${realHistory.error || "backend did not provide an explicit real history source"}`;
+
+  return { ok: true, forecast: data.forecast, history, historySource, source: data.source || "Weather backend", unavailableModels: data.unavailableModels || [], error: "" };
 }
 
 async function fetchAvalancheFromBackend(climb) {
@@ -298,11 +367,11 @@ function RawModelLineChart({ forecast = [], metricKey, title, unit, note }) { co
 
 function ModelAvailabilityPanel({ forecast = [], climb, unavailableModels = [] }) { const applicableModels = FORECAST_MODEL_CATALOG.filter((model) => modelAppliesToClimb(model, climb)); return <Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Model availability and agreement</h3><p className="mb-4 text-sm text-slate-500">Short-range models should only appear inside their valid lead time. If a model is outside its horizon, it is blank—not zero.</p><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Model</th><th className="p-2">Provider</th>{forecast.map((day) => <th key={day.label} className="p-2 text-center">{day.label}</th>)}</tr></thead><tbody>{applicableModels.map((model) => <tr key={model.id} className="border-t"><td className="p-2 font-medium">{model.label}</td><td className="p-2 text-slate-500">{model.provider}</td>{forecast.map((day) => { const value = day.modelValues?.find((m) => m.modelId === model.id); const withinLead = day.dayIndex <= model.maxLeadDays; return <td key={`${model.id}-${day.label}`} className="p-2 text-center">{value ? <div className="rounded-lg bg-emerald-50 px-1 py-1 text-[10px] text-emerald-900">{Math.round(value.summitWindKph)}kph<br />{value.summitTempC?.toFixed?.(1) ?? "—"}°C<br />{value.precipMm?.toFixed?.(1) ?? "—"}mm</div> : withinLead ? <span className="text-red-600">unavail</span> : <span className="text-slate-300">—</span>}</td>; })}</tr>)}</tbody></table></div>{unavailableModels.length > 0 && <div className="mt-3 rounded-xl bg-amber-50 p-3 text-xs text-amber-900">Unavailable/planned: {unavailableModels.join("; ")}</div>}</CardContent></Card>; }
 
-function LookbackPanel({ climb, history = [] }) {
+function LookbackPanel({ climb, history = [], historySource = "NO REAL HISTORY" }) {
   const surface = buildSurfaceState(climb, history);
-  if (!surface.hasData) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700"><strong>NO 14-DAY HISTORY YET</strong><p className="mt-2">The frontend is ready, but /api/weather must return a <code>history</code> array with observed daily wind, temp, rain, snow, freezing level, and pressure.</p></div>;
+  if (!surface.hasData) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700"><strong>NO REAL 14-DAY HISTORY YET</strong><p className="mt-2">Synthetic placeholder history is now suppressed. The app will only show lookback data when it can fetch real recent-past data from Open-Meteo or when the backend explicitly returns real observed/archive history.</p><p className="mt-2 text-xs text-slate-500">History source: {historySource}</p></div>;
   const rawRows = surface.days.map((d, i) => ({ label: d.label || `D-${surface.days.length - i}`, date: d.date, wind: historyWindKph(d), tempMin: historyTempMinC(d), tempMax: historyTempMaxC(d), rain: historyRainMm(d), snow: historySnowCm(d), freezingLevel: historyFreezingLevelM(d), pressure: historyPressureHpa(d) }));
-  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-5"><MetricCard icon={SnowIcon} label="Weighted Snow Load" value={surface.snowLoadingIndex.toFixed(1)} detail={`3d ${surface.snow3d.toFixed(1)} cm · 7d ${surface.snow7d.toFixed(1)} cm`} /><MetricCard icon={SunIcon} label="Freeze/Thaw Cycles" value={surface.freezeThawCycles} detail="Prior 14 days" className={surface.freezeThawCycles >= 4 ? "text-emerald-700" : "text-yellow-700"} /><MetricCard icon={GaugeIcon} label="Warm Pulse" value={surface.warmPulseSeverity.toFixed(1)} detail="FL above route + rain + heat" className={surface.warmPulseSeverity >= 7 ? "text-red-700" : surface.warmPulseSeverity >= 4 ? "text-yellow-700" : "text-emerald-700"} /><MetricCard icon={TrendIcon} label="Surface Damage" value={`${surface.surfaceDamage.toFixed(1)} / 10`} detail="Rain/warmth/loading" className={scoreColor(surface.surfaceDamage, true)} /><MetricCard icon={ShieldIcon} label="Surface Recovery" value={`${surface.surfaceRecovery.toFixed(1)} / 10`} detail="Freeze/thaw + cold nights" className={scoreColor(surface.surfaceRecovery)} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">Surface-state interpretation</h3><p className="mt-2 text-slate-700">{surface.interpretation}</p><p className="mt-2 text-sm text-slate-500">This is the first-pass historical logic layer: it makes the forecast score aware of recent loading, consolidation, warm pulses, and surface recovery.</p></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: wind and temperature</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "wind", label: "Wind", unit: "kph", className: "text-slate-900" }, { key: "tempMin", label: "Summit low", unit: "°C", className: "text-blue-700" }, { key: "tempMax", label: "Summit high", unit: "°C", className: "text-red-700" }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: rain, snow, freezing level, pressure</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "rain", label: "Rain", unit: "mm", className: "text-blue-700" }, { key: "snow", label: "Snow", unit: "cm", className: "text-slate-900" }, { key: "freezingLevel", label: "Freezing level", unit: "m", className: "text-emerald-700" }, { key: "pressure", label: "Pressure", unit: "hPa", className: "text-purple-700" }]} minOverride={0} /></CardContent></Card></div><Card><CardContent className="p-5"><h3 className="mb-3 font-semibold">Raw 14-day observed data</h3><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Day</th><th className="p-2">Date</th><th className="p-2">Wind kph</th><th className="p-2">Temp low/high °C</th><th className="p-2">Rain mm</th><th className="p-2">Snow cm</th><th className="p-2">Freezing level m</th><th className="p-2">Pressure hPa</th></tr></thead><tbody>{rawRows.map((r) => <tr key={`${r.label}-${r.date}`} className="border-t"><td className="p-2 font-medium">{r.label}</td><td className="p-2 text-slate-500">{r.date}</td><td className="p-2">{Number(r.wind).toFixed(1)}</td><td className="p-2">{Number(r.tempMin).toFixed(1)} / {Number(r.tempMax).toFixed(1)}</td><td className="p-2">{Number(r.rain).toFixed(1)}</td><td className="p-2">{Number(r.snow).toFixed(1)}</td><td className="p-2">{Math.round(r.freezingLevel || 0)}</td><td className="p-2">{Math.round(r.pressure || 0)}</td></tr>)}</tbody></table></div></CardContent></Card></div>;
+  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-5"><MetricCard icon={SnowIcon} label="Weighted Snow Load" value={surface.snowLoadingIndex.toFixed(1)} detail={`3d ${surface.snow3d.toFixed(1)} cm · 7d ${surface.snow7d.toFixed(1)} cm`} /><MetricCard icon={SunIcon} label="Freeze/Thaw Cycles" value={surface.freezeThawCycles} detail="Prior 14 days" className={surface.freezeThawCycles >= 4 ? "text-emerald-700" : "text-yellow-700"} /><MetricCard icon={GaugeIcon} label="Warm Pulse" value={surface.warmPulseSeverity.toFixed(1)} detail="FL above route + rain + heat" className={surface.warmPulseSeverity >= 7 ? "text-red-700" : surface.warmPulseSeverity >= 4 ? "text-yellow-700" : "text-emerald-700"} /><MetricCard icon={TrendIcon} label="Surface Damage" value={`${surface.surfaceDamage.toFixed(1)} / 10`} detail="Rain/warmth/loading" className={scoreColor(surface.surfaceDamage, true)} /><MetricCard icon={ShieldIcon} label="Surface Recovery" value={`${surface.surfaceRecovery.toFixed(1)} / 10`} detail="Freeze/thaw + cold nights" className={scoreColor(surface.surfaceRecovery)} /></div><Card><CardContent className="p-5"><div className="mb-3 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-900"><strong>History source:</strong> {historySource}</div><h3 className="font-semibold">Surface-state interpretation</h3><p className="mt-2 text-slate-700">{surface.interpretation}</p><p className="mt-2 text-sm text-slate-500">This is the first-pass historical logic layer: it makes the forecast score aware of recent loading, consolidation, warm pulses, and surface recovery.</p></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: wind and temperature</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "wind", label: "Wind", unit: "kph", className: "text-slate-900" }, { key: "tempMin", label: "Summit low", unit: "°C", className: "text-blue-700" }, { key: "tempMax", label: "Summit high", unit: "°C", className: "text-red-700" }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: rain, snow, freezing level, pressure</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "rain", label: "Rain", unit: "mm", className: "text-blue-700" }, { key: "snow", label: "Snow", unit: "cm", className: "text-slate-900" }, { key: "freezingLevel", label: "Freezing level", unit: "m", className: "text-emerald-700" }, { key: "pressure", label: "Pressure", unit: "hPa", className: "text-purple-700" }]} minOverride={0} /></CardContent></Card></div><Card><CardContent className="p-5"><h3 className="mb-3 font-semibold">Raw 14-day observed data</h3><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Day</th><th className="p-2">Date</th><th className="p-2">Wind kph</th><th className="p-2">Temp low/high °C</th><th className="p-2">Rain mm</th><th className="p-2">Snow cm</th><th className="p-2">Freezing level m</th><th className="p-2">Pressure hPa</th><th className="p-2">Notes</th></tr></thead><tbody>{rawRows.map((r) => <tr key={`${r.label}-${r.date}`} className="border-t"><td className="p-2 font-medium">{r.label}</td><td className="p-2 text-slate-500">{r.date}</td><td className="p-2">{Number(r.wind).toFixed(1)}</td><td className="p-2">{Number(r.tempMin).toFixed(1)} / {Number(r.tempMax).toFixed(1)}</td><td className="p-2">{Number(r.rain).toFixed(1)}</td><td className="p-2">{Number(r.snow).toFixed(1)}</td><td className="p-2">{Math.round(r.freezingLevel || 0)}</td><td className="p-2">{Math.round(r.pressure || 0)}</td><td className="p-2 text-slate-500">{surface.days.find((d) => d.date === r.date)?.freezingLevelEstimated ? "FL estimated" : ""}</td></tr>)}</tbody></table></div></CardContent></Card></div>;
 }
 
 function routeElevationProfile(climb) {
@@ -666,6 +735,7 @@ export default function MountainWindowApp() {
   const hasLiveData = !!weatherState.data?.ok;
   const forecast = hasLiveData ? weatherState.data.forecast : [];
   const history = hasLiveData ? weatherState.data.history : [];
+  const historySource = hasLiveData ? weatherState.data.historySource : "NO REAL HISTORY";
   const source = hasLiveData ? weatherState.data.source : "NO DATA";
   const unavailableModels = weatherState.data?.unavailableModels || [];
   const avalancheHistory = avalancheState.data?.avalancheHistory || [];
@@ -702,7 +772,7 @@ export default function MountainWindowApp() {
     <div className="grid grid-cols-7 gap-2 rounded-2xl bg-white p-1 shadow-sm"><TabButton active={tab === "forecast"} onClick={() => setTab("forecast")}>Forecast</TabButton><TabButton active={tab === "corn"} onClick={() => setTab("corn")}>Snow Surface</TabButton><TabButton active={tab === "lookback"} onClick={() => setTab("lookback")}>14-day lookback</TabButton><TabButton active={tab === "avalanche"} onClick={() => setTab("avalanche")}>Avalanche</TabButton><TabButton active={tab === "alerts"} onClick={() => setTab("alerts")}>Alerts</TabButton><TabButton active={tab === "map"} onClick={() => setTab("map")}>Map</TabButton><TabButton active={tab === "logic"} onClick={() => setTab("logic")}>Scoring logic</TabButton></div>
     {tab === "forecast" && <div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><WindIcon /> Forecast: wind by elevation</h3><MiniLineChart data={combinedChart} series={[{ key: "summitWindAvg", label: "Summit wind", unit: "kph", className: "text-slate-900" }, { key: "midWindAvg", label: "Mid-mountain wind", unit: "kph", className: "text-slate-500" }, { key: "valleyWindAvg", label: "Valley wind", unit: "kph", className: "text-slate-400" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SunIcon /> Forecast: summit temperature swing</h3><MiniLineChart data={combinedChart} series={[{ key: "summitTempAvg", label: "Summit avg", unit: "°C", className: "text-slate-900" }, { key: "summitTempMinAvg", label: "Summit low", unit: "°C", className: "text-slate-500" }, { key: "summitTempMaxAvg", label: "Summit high", unit: "°C", className: "text-slate-400" }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><RainIcon /> Forecast: summit rain</h3><MiniLineChart data={combinedChart} series={[{ key: "summitRainAvg", label: "Summit rain", unit: "mm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SnowIcon /> Forecast: summit snow</h3><MiniLineChart data={combinedChart} series={[{ key: "summitSnowAvg", label: "Summit snow", unit: "cm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><MountainIcon /> Freezing level</h3><MiniLineChart data={combinedChart} series={[{ key: "freezingLevelM", label: "Freezing level", unit: "m", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><GaugeIcon /> Pressure</h3><MiniLineChart data={combinedChart} series={[{ key: "pressureHpa", label: "Pressure", unit: "hPa", className: "text-slate-900" }]} /></CardContent></Card></div>}
     {tab === "corn" && <SnowSurfacePanel climb={climb} forecast={forecast} avalanche={avalanche} />}
-    {tab === "lookback" && <LookbackPanel climb={climb} history={history} />}
+    {tab === "lookback" && <LookbackPanel climb={climb} history={history} historySource={historySource} />}
     {tab === "avalanche" && <div className="grid gap-4 lg:grid-cols-3"><Card className="lg:col-span-2"><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SnowIcon /> Live avalanche bulletin</h3>{!hasAvalancheData && <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900"><strong>NO LIVE AVALANCHE DATA IN SCORING</strong><div className="mt-2">{avalancheState.error || avalanche.headline}</div></div>}{hasAvalancheData && <><div className="mb-3 text-sm text-slate-600">Source: {avalancheState.data?.source}</div><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[760px] text-sm"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-3">Valid / Issued</th><th className="p-3">Alpine</th><th className="p-3">Treeline</th><th className="p-3">Problems</th><th className="p-3">Summary</th></tr></thead><tbody>{avalancheHistory.map((d) => <tr key={d.label} className="border-t"><td className="p-3 font-medium">{d.label}</td><td className="p-3"><DangerBadge rating={d.alpine || 0} /></td><td className="p-3"><DangerBadge rating={d.treeline || 0} /></td><td className="p-3">{(d.problems || []).join(", ") || "—"}</td><td className="p-3 text-slate-600">{d.note}</td></tr>)}</tbody></table></div></>}</CardContent></Card><Card><CardContent className="space-y-4 p-5"><h3 className="font-semibold">Avalanche summary</h3><div><div className="text-sm text-slate-500">Current alpine rating</div><div className="mt-1"><DangerBadge rating={avalanche.last?.alpine || 0} /></div></div><p className="text-sm text-slate-700">{avalanche.headline}</p>{avalancheState.loading && <p className="text-xs text-slate-500">Loading avalanche feed…</p>}</CardContent></Card></div>}
     {tab === "alerts" && <AlertRulePanel climb={climb} mode={mode} setMode={setMode} />}
     {tab === "map" && <MapPickerPlaceholder onSelect={(id) => { setClimbId(id); setTab("forecast"); }} />}
