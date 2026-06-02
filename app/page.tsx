@@ -425,6 +425,17 @@ function classifyPattern(history = [], forecast = []) { if (!history.length || f
 
 function historySnowCm(day) { return day.observedSnowCm ?? day.snowCm ?? day.summitSnowCm ?? 0; }
 function historyRainMm(day) { return day.observedRainMm ?? day.rainMm ?? day.summitRainMm ?? 0; }
+function historyDamagingRainMm(day, climb) {
+  const rawRain = historyRainMm(day);
+  if (!rawRain) return 0;
+  const summitHigh = historyTempMaxC(day);
+  const fl = historyFreezingLevelM(day);
+  // Open-Meteo archive rain can reflect grid-scale surface precip even when the elevation-adjusted summit
+  // temperature is well below freezing. For route-condition damage, only treat it as damaging rain
+  // when summit temperatures are near/above freezing or the estimated freezing level is close to/above the route.
+  if (summitHigh >= -1 || fl >= (climb.summitM - 150)) return rawRain;
+  return 0;
+}
 function historyWindKph(day) { return day.observedWindKph ?? day.windKph ?? day.summitWindKph ?? 0; }
 function historyTempC(day) { return day.observedSummitTempC ?? day.summitTempC ?? day.tempC ?? 0; }
 function historyTempMinC(day) { return day.observedSummitTempMinC ?? day.summitTempMinC ?? day.tempMinC ?? historyTempC(day) - 3; }
@@ -440,6 +451,7 @@ function buildSurfaceState(climb, history = []) {
   const snow7d = days.slice(-7).reduce((s, d) => s + historySnowCm(d), 0);
   const snow3d = days.slice(-3).reduce((s, d) => s + historySnowCm(d), 0);
   const rain14d = days.reduce((s, d) => s + historyRainMm(d), 0);
+  const damagingRain14d = days.reduce((s, d) => s + historyDamagingRainMm(d, climb), 0);
   const snowLoadingIndex = days.reduce((s, d, i) => { const daysAgo = days.length - 1 - i; return s + historySnowCm(d) * Math.exp(-daysAgo / 3); }, 0);
 
   // Two different historical signals matter for Robson-style alpine routes:
@@ -448,14 +460,14 @@ function buildSurfaceState(climb, history = []) {
   // The old logic collapsed both into "warm pulse" and over-penalized useful near-summit warming.
   const refreezeNights = days.filter((d) => historyTempMinC(d) <= -3).length;
   const deepColdNights = days.filter((d) => historyTempMinC(d) <= -8).length;
-  const nearThawDryDays = days.filter((d) => historyTempMaxC(d) >= -3 && historyTempMaxC(d) <= 1 && historyRainMm(d) < 1 && historySnowCm(d) < 5).length;
+  const nearThawDryDays = days.filter((d) => historyTempMaxC(d) >= -3 && historyTempMaxC(d) <= 1 && historyDamagingRainMm(d, climb) < 1 && historySnowCm(d) < 5).length;
   const trueThawDays = days.filter((d) => historyTempMaxC(d) > 1 || historyFreezingLevelM(d) > climb.summitM + 150).length;
-  const rainDays = days.filter((d) => historyRainMm(d) >= 1).length;
+  const rainDays = days.filter((d) => historyDamagingRainMm(d, climb) >= 1).length;
 
   // Count both literal freeze/thaw and useful near-thaw refreeze cycles for alpine snow/ice.
   // For Kain Face, a -10C night followed by -1C dry afternoon is meaningful even if it never goes above 0C.
   const literalFreezeThawCycles = days.filter((d) => historyTempMinC(d) < -1 && historyTempMaxC(d) > 1).length;
-  const usefulRefreezeCycles = days.filter((d) => historyTempMinC(d) <= -3 && historyTempMaxC(d) >= -3 && historyRainMm(d) < 1).length;
+  const usefulRefreezeCycles = days.filter((d) => historyTempMinC(d) <= -3 && historyTempMaxC(d) >= -3 && historyDamagingRainMm(d, climb) < 1).length;
   const freezeThawCycles = Math.max(literalFreezeThawCycles, usefulRefreezeCycles);
 
   const consolidationIndex = clampScore(
@@ -463,14 +475,14 @@ function buildSurfaceState(climb, history = []) {
     usefulRefreezeCycles * 0.8 +
     Math.min(2.0, deepColdNights * 0.18) -
     Math.max(0, snow3d - 10) * 0.12 -
-    rain14d * 0.25
+    damagingRain14d * 0.25
   );
 
   const meltDamageIndex = clampScore(days.reduce((s, d) => {
     const fl = historyFreezingLevelM(d);
     const summitExcessM = Math.max(0, fl - (climb.summitM + 150));
     const positiveSummitC = Math.max(0, historyTempMaxC(d) - 1);
-    const rain = historyRainMm(d);
+    const rain = historyDamagingRainMm(d, climb);
     return s + summitExcessM / 550 + positiveSummitC * 0.9 + rain * 0.7;
   }, 0));
 
@@ -478,13 +490,13 @@ function buildSurfaceState(climb, history = []) {
   const warmPulseSeverity = meltDamageIndex;
   const windStripping = days.reduce((s, d) => s + Math.max(0, historyWindKph(d) - 35) * 0.08, 0);
   const recentLoadingPenalty = Math.max(0, snow3d - 12) * 0.12 + Math.max(0, snow7d - 25) * 0.05;
-  const surfaceDamage = clampScore(meltDamageIndex * 0.75 + rain14d * 0.25 + recentLoadingPenalty);
+  const surfaceDamage = clampScore(meltDamageIndex * 0.75 + damagingRain14d * 0.25 + recentLoadingPenalty);
   const surfaceRecovery = clampScore(consolidationIndex * 0.65 + refreezeNights * 0.22 + windStripping * 0.15 - meltDamageIndex * 0.15);
 
   let routePhase = "transitional / uncertain";
   if (climb.routeType === "mixed_alpine_ice") {
     if (snowLoadingIndex > 25 || snow3d > 15) routePhase = "recent loading / unconsolidated concern";
-    else if (meltDamageIndex >= 7 || rain14d > 8) routePhase = "melt-damage / rain affected concern";
+    else if (meltDamageIndex >= 7 || damagingRain14d > 8) routePhase = "melt-damage / rain affected concern";
     else if (consolidationIndex >= 6 && surfaceDamage <= 4.5 && snow7d <= 10) routePhase = "prime neve / consolidation signal";
     else if (consolidationIndex >= 4.5 && surfaceDamage <= 5.5) routePhase = "improving alpine surface";
   } else if (climb.routeType === "pure_rock") {
@@ -508,7 +520,7 @@ function buildSurfaceState(climb, history = []) {
   } else {
     interpretation += `14d snow ${snow14d.toFixed(1)} cm, 7d snow ${snow7d.toFixed(1)} cm, rain ${rain14d.toFixed(1)} mm, useful refreeze/consolidation cycles ${freezeThawCycles}, consolidation ${consolidationIndex.toFixed(1)}, melt damage ${meltDamageIndex.toFixed(1)}.`;
   }
-  return { hasData: true, days, snowLoadingIndex, snow3d, snow7d, snow14d, rain14d, freezeThawCycles, literalFreezeThawCycles, usefulRefreezeCycles, refreezeNights, nearThawDryDays, trueThawDays, rainDays, consolidationIndex, meltDamageIndex, warmPulseSeverity, surfaceDamage, surfaceRecovery, routePhase, interpretation };
+  return { hasData: true, days, snowLoadingIndex, snow3d, snow7d, snow14d, rain14d, damagingRain14d, freezeThawCycles, literalFreezeThawCycles, usefulRefreezeCycles, refreezeNights, nearThawDryDays, trueThawDays, rainDays, consolidationIndex, meltDamageIndex, warmPulseSeverity, surfaceDamage, surfaceRecovery, routePhase, interpretation };
 }
 
 function runTests() {
@@ -583,8 +595,8 @@ function ModelAvailabilityPanel({ forecast = [], climb, unavailableModels = [] }
 function LookbackPanel({ climb, history = [], historySource = "NO REAL HISTORY" }) {
   const surface = buildSurfaceState(climb, history);
   if (!surface.hasData) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700"><strong>NO REAL 14-DAY HISTORY YET</strong><p className="mt-2">Synthetic placeholder history is now suppressed. The app will only show lookback data when it can fetch real recent-past data from Open-Meteo or when the backend explicitly returns real observed/archive history.</p><p className="mt-2 text-xs text-slate-500">History source: {historySource}</p></div>;
-  const rawRows = surface.days.map((d, i) => ({ label: d.label || `D-${surface.days.length - i}`, date: d.date, wind: historyWindKph(d), tempMin: historyTempMinC(d), tempMax: historyTempMaxC(d), rain: historyRainMm(d), snow: historySnowCm(d), freezingLevel: historyFreezingLevelM(d), pressure: historyPressureHpa(d) }));
-  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-6"><MetricCard icon={SnowIcon} label="Weighted Snow Load" value={surface.snowLoadingIndex.toFixed(1)} detail={`3d ${surface.snow3d.toFixed(1)} cm · 7d ${surface.snow7d.toFixed(1)} cm`} /><MetricCard icon={SunIcon} label="Useful Refreeze Cycles" value={surface.freezeThawCycles} detail="Includes dry near-thaw consolidation" className={surface.freezeThawCycles >= 4 ? "text-emerald-700" : "text-yellow-700"} /><MetricCard icon={GaugeIcon} label="Consolidation" value={`${surface.consolidationIndex.toFixed(1)} / 10`} detail="Dry near-thaw + cold nights" className={scoreColor(surface.consolidationIndex)} /><MetricCard icon={AlertIcon} label="Melt Damage" value={`${surface.meltDamageIndex.toFixed(1)} / 10`} detail="Rain or true above-summit thaw" className={scoreColor(surface.meltDamageIndex, true)} /><MetricCard icon={TrendIcon} label="Surface Damage" value={`${surface.surfaceDamage.toFixed(1)} / 10`} detail="Melt/rain/loading" className={scoreColor(surface.surfaceDamage, true)} /><MetricCard icon={ShieldIcon} label="Surface Recovery" value={`${surface.surfaceRecovery.toFixed(1)} / 10`} detail="Consolidation + refreeze" className={scoreColor(surface.surfaceRecovery)} /></div><Card><CardContent className="p-5"><div className="mb-3 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-900"><strong>History source:</strong> {historySource}</div><h3 className="font-semibold">Surface-state interpretation</h3><p className="mt-2 text-slate-700">{surface.interpretation}</p><p className="mt-2 text-sm text-slate-500">This historical layer separates useful consolidation from actual melt damage. For Robson-style routes, a dry near-freezing afternoon after a cold night can improve neve; rain, summit-positive warmth, or freezing levels well above the summit are treated as damage.</p></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: wind and temperature</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "wind", label: "Wind", unit: "kph", color: "#111827", dash: "", width: 3.5 }, { key: "tempMin", label: "Summit low", unit: "°C", color: "#2563eb", dash: "8 5", width: 3 }, { key: "tempMax", label: "Summit high", unit: "°C", color: "#dc2626", dash: "2 5", width: 3 }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: rain, snow, freezing level, pressure</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "rain", label: "Rain", unit: "mm", color: "#1d4ed8", dash: "", width: 3 }, { key: "snow", label: "Snow", unit: "cm", color: "#60a5fa", dash: "8 4", width: 3 }, { key: "freezingLevel", label: "Freezing level", unit: "m", color: "#059669", dash: "2 5", width: 3 }, { key: "pressure", label: "Pressure", unit: "hPa", color: "#7c3aed", dash: "", width: 3.5 }]} minOverride={0} /></CardContent></Card></div><Card><CardContent className="p-5"><h3 className="mb-3 font-semibold">Raw 14-day observed data</h3><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Day</th><th className="p-2">Date</th><th className="p-2">Wind kph</th><th className="p-2">Temp low/high °C</th><th className="p-2">Rain mm</th><th className="p-2">Snow cm</th><th className="p-2">Freezing level m</th><th className="p-2">Pressure hPa</th><th className="p-2">Notes</th></tr></thead><tbody>{rawRows.map((r) => <tr key={`${r.label}-${r.date}`} className="border-t"><td className="p-2 font-medium">{r.label}</td><td className="p-2 text-slate-500">{r.date}</td><td className="p-2">{Number(r.wind).toFixed(1)}</td><td className="p-2">{Number(r.tempMin).toFixed(1)} / {Number(r.tempMax).toFixed(1)}</td><td className="p-2">{Number(r.rain).toFixed(1)}</td><td className="p-2">{Number(r.snow).toFixed(1)}</td><td className="p-2">{Math.round(r.freezingLevel || 0)}</td><td className="p-2">{Math.round(r.pressure || 0)}</td><td className="p-2 text-slate-500">{surface.days.find((d) => d.date === r.date)?.freezingLevelEstimated ? "FL estimated" : ""}</td></tr>)}</tbody></table></div></CardContent></Card></div>;
+  const rawRows = surface.days.map((d, i) => ({ label: d.label || `D-${surface.days.length - i}`, date: d.date, wind: historyWindKph(d), tempMin: historyTempMinC(d), tempMax: historyTempMaxC(d), rain: historyRainMm(d), damagingRain: historyDamagingRainMm(d, climb), snow: historySnowCm(d), freezingLevel: historyFreezingLevelM(d), pressure: historyPressureHpa(d) }));
+  return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-6"><MetricCard icon={SnowIcon} label="Weighted Snow Load" value={surface.snowLoadingIndex.toFixed(1)} detail={`3d ${surface.snow3d.toFixed(1)} cm · 7d ${surface.snow7d.toFixed(1)} cm`} /><MetricCard icon={SunIcon} label="Useful Refreeze Cycles" value={surface.freezeThawCycles} detail="Includes dry near-thaw consolidation" className={surface.freezeThawCycles >= 4 ? "text-emerald-700" : "text-yellow-700"} /><MetricCard icon={GaugeIcon} label="Consolidation" value={`${surface.consolidationIndex.toFixed(1)} / 10`} detail="Dry near-thaw + cold nights" className={scoreColor(surface.consolidationIndex)} /><MetricCard icon={AlertIcon} label="Melt Damage" value={`${surface.meltDamageIndex.toFixed(1)} / 10`} detail="Rain or true above-summit thaw" className={scoreColor(surface.meltDamageIndex, true)} /><MetricCard icon={TrendIcon} label="Surface Damage" value={`${surface.surfaceDamage.toFixed(1)} / 10`} detail="Melt/rain/loading" className={scoreColor(surface.surfaceDamage, true)} /><MetricCard icon={ShieldIcon} label="Surface Recovery" value={`${surface.surfaceRecovery.toFixed(1)} / 10`} detail="Consolidation + refreeze" className={scoreColor(surface.surfaceRecovery)} /></div><Card><CardContent className="p-5"><div className="mb-3 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-900"><strong>History source:</strong> {historySource}</div><h3 className="font-semibold">Surface-state interpretation</h3><p className="mt-2 text-slate-700">{surface.interpretation}</p><p className="mt-2 text-sm text-slate-500">This historical layer separates useful consolidation from actual melt damage. For Robson-style routes, a dry near-freezing afternoon after a cold night can improve neve; raw rain is only treated as route-damaging rain when summit temperatures/freezing level support liquid water at route elevation; summit-positive warmth or freezing levels well above the summit are treated as damage.</p></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: wind and temperature</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "wind", label: "Wind", unit: "kph", color: "#111827", dash: "", width: 3.5 }, { key: "tempMin", label: "Summit low", unit: "°C", color: "#2563eb", dash: "8 5", width: 3 }, { key: "tempMax", label: "Summit high", unit: "°C", color: "#dc2626", dash: "2 5", width: 3 }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: precipitation</h3><p className="mb-3 text-sm text-slate-500">Raw rain/snow is plotted on its own scale so small but important precipitation events are visible. Damaging rain only counts as route damage when summit temps/freezing level support liquid water at route elevation.</p><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "rain", label: "Raw rain", unit: "mm", color: "#1d4ed8", dash: "", width: 3.5 }, { key: "damagingRain", label: "Damaging rain", unit: "mm", color: "#dc2626", dash: "2 5", width: 3 }, { key: "snow", label: "Snow", unit: "cm", color: "#60a5fa", dash: "8 4", width: 3 }]} minOverride={0} /></CardContent></Card><Card className="lg:col-span-2"><CardContent className="p-5"><h3 className="mb-4 font-semibold">14-day raw history: freezing level and pressure</h3><MiniLineChart data={rawRows} labelKey="label" series={[{ key: "freezingLevel", label: "Freezing level", unit: "m", color: "#059669", dash: "2 5", width: 3 }, { key: "pressure", label: "Pressure", unit: "hPa", color: "#7c3aed", dash: "", width: 3.5 }]} minOverride={0} /></CardContent></Card></div><Card><CardContent className="p-5"><h3 className="mb-3 font-semibold">Raw 14-day observed data</h3><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[900px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Day</th><th className="p-2">Date</th><th className="p-2">Wind kph</th><th className="p-2">Temp low/high °C</th><th className="p-2">Raw rain mm</th><th className="p-2">Damage rain mm</th><th className="p-2">Snow cm</th><th className="p-2">Freezing level m</th><th className="p-2">Pressure hPa</th><th className="p-2">Notes</th></tr></thead><tbody>{rawRows.map((r) => <tr key={`${r.label}-${r.date}`} className="border-t"><td className="p-2 font-medium">{r.label}</td><td className="p-2 text-slate-500">{r.date}</td><td className="p-2">{Number(r.wind).toFixed(1)}</td><td className="p-2">{Number(r.tempMin).toFixed(1)} / {Number(r.tempMax).toFixed(1)}</td><td className="p-2">{Number(r.rain).toFixed(1)}</td><td className="p-2">{Number(r.damagingRain).toFixed(1)}</td><td className="p-2">{Number(r.snow).toFixed(1)}</td><td className="p-2">{Math.round(r.freezingLevel || 0)}</td><td className="p-2">{Math.round(r.pressure || 0)}</td><td className="p-2 text-slate-500">{surface.days.find((d) => d.date === r.date)?.freezingLevelEstimated ? "FL estimated" : ""}</td></tr>)}</tbody></table></div></CardContent></Card></div>;
 }
 
 function routeElevationProfile(climb) {
