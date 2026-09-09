@@ -23,15 +23,17 @@ const climbs = [
 ];
 
 const FORECAST_MODEL_CATALOG = [
-  { id: "gfs", label: "GFS", provider: "NOAA via Open-Meteo", maxLeadDays: 16, regions: ["global"] },
-  { id: "gem_global", label: "GEM Global / GDPS", provider: "ECCC via Open-Meteo", maxLeadDays: 10, regions: ["global"] },
-  { id: "gem_regional", label: "GEM Regional / RDPS", provider: "ECCC via Open-Meteo", maxLeadDays: 3.5, regions: ["canada"] },
-  { id: "gem_hrdps_continental", label: "HRDPS Continental", provider: "ECCC via Open-Meteo", maxLeadDays: 2, regions: ["canada"] },
-  { id: "nam_conus", label: "NAM CONUS", provider: "NOAA via Open-Meteo", maxLeadDays: 4, regions: ["usa"] },
-  { id: "gfs_hrrr", label: "HRRR", provider: "NOAA via Open-Meteo", maxLeadDays: 2, regions: ["usa"] },
-  { id: "noaa_rap", label: "RAP", provider: "NOAA direct connector required", maxLeadDays: 1, regions: ["usa"] },
-  { id: "ecmwf_ifs025", label: "ECMWF IFS", provider: "ECMWF via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
-  { id: "ecmwf_aifs025", label: "ECMWF AIFS", provider: "ECMWF via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
+  { id: "gfs", label: "GFS", provider: "NOAA GFS via Open-Meteo", maxLeadDays: 16, regions: ["global"] },
+  { id: "ecmwf_ifs", label: "ECMWF IFS HRES 9 km", provider: "ECMWF via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
+  { id: "ecmwf_aifs", label: "ECMWF AIFS", provider: "ECMWF AIFS via Open-Meteo", maxLeadDays: 15, regions: ["global"] },
+  { id: "gem_global", label: "GEM Global / GDPS", provider: "ECCC GDPS via Open-Meteo", maxLeadDays: 10, regions: ["global"] },
+  { id: "gem_regional", label: "GEM Regional / RDPS", provider: "ECCC RDPS via Open-Meteo", maxLeadDays: 3.5, regions: ["north_america"] },
+  { id: "gem_hrdps_continental", label: "HRDPS Continental", provider: "ECCC HRDPS via Open-Meteo", maxLeadDays: 2, regions: ["north_america"] },
+  { id: "gem_hrdps_west", label: "HRDPS West (experimental)", provider: "ECCC HRDPS West via Open-Meteo", maxLeadDays: 2, regions: ["north_america"] },
+  { id: "gfs_hrrr", label: "HRRR", provider: "NOAA HRRR via Open-Meteo", maxLeadDays: 2, regions: ["north_america"] },
+  { id: "nam_conus", label: "NAM CONUS", provider: "NOAA NAM via Open-Meteo", maxLeadDays: 2.5, regions: ["north_america"] },
+  { id: "noaa_nbm", label: "NBM (blended guidance)", provider: "NOAA NBM via Open-Meteo", maxLeadDays: 11, regions: ["north_america"], guidanceOnly: true },
+  { id: "noaa_rap", label: "RAP", provider: "NOAA/NOMADS connector pending", maxLeadDays: 2.125, regions: ["north_america"] },
 ];
 
 function Card({ children, className = "" }) { return <div className={`rounded-2xl border border-slate-200 bg-white shadow-sm ${className}`}>{children}</div>; }
@@ -53,8 +55,24 @@ const ShieldIcon = (p) => <Icon {...p}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6
 const clampScore = (value) => Math.max(0, Math.min(10, Number(value) || 0));
 const avg = (values = []) => { const clean = values.filter((v) => typeof v === "number" && Number.isFinite(v)); return clean.length ? clean.reduce((s, v) => s + v, 0) / clean.length : 0; };
 const spread = (values = []) => { const clean = values.filter((v) => typeof v === "number" && Number.isFinite(v)); return clean.length > 1 ? Math.max(...clean) - Math.min(...clean) : 0; };
-function getObjectiveRegion(climb) { if (climb.region.includes("Washington")) return "usa"; if (climb.region.includes("Canadian") || climb.region.includes("Selkirks") || climb.region.includes("Purcells")) return "canada"; return "global"; }
-function modelAppliesToClimb(model, climb) { if (!model || !climb) return false; const region = getObjectiveRegion(climb); return model.regions.includes("global") || model.regions.includes(region); }
+function getObjectiveRegion(climb) {
+  if (!climb) return "global";
+  if (climb.region.includes("Washington")) return "usa";
+  if (
+    climb.region.includes("Canadian") ||
+    climb.region.includes("Selkirks") ||
+    climb.region.includes("Purcells") ||
+    climb.region.includes("South Coast") ||
+    climb.region.includes("Coast Mountains")
+  ) return "canada";
+  return "global";
+}
+function modelAppliesToClimb(model, climb) {
+  if (!model || !climb) return false;
+  const region = getObjectiveRegion(climb);
+  if (model.regions.includes("global")) return true;
+  return model.regions.includes("north_america") && (region === "usa" || region === "canada");
+}
 function scoreColor(score, inverse = false) { const v = inverse ? 10 - score : score; return v >= 7.5 ? "text-emerald-700" : v >= 5 ? "text-yellow-700" : "text-red-700"; }
 function dangerStyle(d) { if (d <= 0) return { backgroundColor: "#e5e7eb", color: "#111827", border: "1px solid #cbd5e1" }; if (d === 1) return { backgroundColor: "#00a651", color: "#fff" }; if (d === 2) return { backgroundColor: "#fff200", color: "#111827" }; if (d === 3) return { backgroundColor: "#f7941d", color: "#111827" }; if (d === 4) return { backgroundColor: "#ed1c24", color: "#fff" }; return { backgroundColor: "#000", color: "#fff" }; }
 function DangerBadge({ rating }) { const labels = ["No Rating", "Low", "Moderate", "Considerable", "High", "Extreme"]; return <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold" style={dangerStyle(rating)}>{labels[rating] || "No Rating"}</span>; }
@@ -595,7 +613,11 @@ function runTests() {
   console.assert(scoreWindowForDays(adams, [{ summitWindGfsKph: 10, summitWindEcmwfKph: 10, summitTempGfsC: -1, summitTempEcmwfC: 0, summitTempMinAvgC: -5, summitTempMaxAvgC: 3.4, midTempGfsC: 1, midTempEcmwfC: 2, precipGfsMm: 0, precipEcmwfMm: 0.1, freezingLevelM: 3800, pressureHpa: 1022 }]) > 7, "Corn objective should reward overnight freeze plus daytime summit thaw near 0C");
   console.assert(findBestUpcomingWindow(robson, [], []).label === "NO DATA", "No forecast should return NO DATA window");
   console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gfs_hrrr"), climbs.find((c) => c.id === "adams-sw-chutes")), "HRRR should apply to US objectives");
-  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gem_hrdps_continental"), climbs.find((c) => c.id === "robson-kain")), "HRDPS should apply to Canadian objectives");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gfs_hrrr"), climbs.find((c) => c.id === "rogers-three-passes")), "HRRR should be attempted for Canadian objectives when the coordinate lies inside the model domain");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "nam_conus"), climbs.find((c) => c.id === "robson-kain")), "NAM should be attempted for North-American objectives; backend/provider decides actual domain coverage");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "gem_hrdps_continental"), climbs.find((c) => c.id === "adams-sw-chutes")), "HRDPS should be attempted for northern US objectives when in-domain");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "ecmwf_ifs"), climbs.find((c) => c.id === "robson-kain")), "ECMWF IFS HRES should apply globally");
+  console.assert(modelAppliesToClimb(FORECAST_MODEL_CATALOG.find((m) => m.id === "ecmwf_aifs"), climbs.find((c) => c.id === "ptarmigan-traverse")), "ECMWF AIFS should apply globally");
   console.assert(!climbs.find((c) => c.id === "st-helens-worm-flows"), "St Helens Worm Flows should be removed");
   console.assert(climbs.find((c) => c.id === "swiss-couloir")?.routeType === "powder_ski", "Swiss Couloir should be a powder objective");
   console.assert(climbs.find((c) => c.id === "rogers-three-passes")?.routeType === "winter_traverse", "Three Passes should use traverse-specific logic");
