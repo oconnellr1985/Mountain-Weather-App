@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeWeatherNext, expectedHours, localDate, weatherNextInsight, WEATHER_NEXT_ID, WEATHER_NEXT_MODEL } from "../lib/weather-next-data";
+import { normalizeWeatherNext, expectedHours, localDate, weatherNextInsight, WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, WEATHER_NEXT_BANDS, weatherNextRegionPayload } from "../lib/weather-next-data";
 import { aggregate, MODEL_CATALOG } from "../lib/forecast-service";
 import { safeWeatherNextError, weatherNextConfiguration } from "../lib/weather-next-server";
 import { scoreWindowForDays } from "../lib/weather";
@@ -114,4 +114,16 @@ test("malformed data and provider errors fail safely without leaking secrets", (
   assert.ok(!safeWeatherNextError(new Error("request failed Authorization Bearer secret-123")).includes("secret-123"));
   assert.match(safeWeatherNextError(new Error("403 permission denied")), /cannot read WeatherNext/);
   assert.equal(weatherNextConfiguration().ready, false);
+});
+
+test("point-table extraction preserves valid times, lead hours and nulls independent of column order", () => {
+  const p = payload();
+  const header = ["id", "time", "forecast_hour_value", ...[...WEATHER_NEXT_BANDS].reverse()];
+  const first = p.rows[0];
+  const raw = { runStart: init, table: [header, header.map(h => h === "id" ? "step1" : h === "time" ? Date.parse(first.validTime) : h === "forecast_hour_value" ? 1 : first.bands[h])] };
+  const decoded = weatherNextRegionPayload(raw);
+  assert.equal(decoded.rows[0].validTime, first.validTime);
+  assert.equal(decoded.rows[0].forecastHour, 1);
+  assert.equal(decoded.rows[0].bands.temperature_2m_mean, 273.15);
+  assert.throws(() => weatherNextRegionPayload({runStart:init,table:[["time"],[now]]}), /schema/);
 });

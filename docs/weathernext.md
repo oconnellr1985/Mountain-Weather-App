@@ -34,7 +34,7 @@ For a keyless service-account deployment, omit GOOGLE_CREDENTIALS_JSON and confi
 - Source: projects/gcp-public-data-weathernext/assets/weathernext_3_0_0_0p1deg.
 - Select the newest main initialization with a 360-hour asset. The newer interim 48-hour runs do not replace the full-horizon run.
 - Use start_time as initialization and end_time as valid time. Validate forecast_hour against both timestamps. Do not infer valid time from system:time_start.
-- Sample the 0.1-degree grid at each objective, at 10,000m reducer scale.
+- Sample the 0.1-degree grid at each objective, with a single point-table extraction at 10,000m scale.
 - Convert Kelvin to Celsius, m/s to km/h, hourly precipitation metres to millimetres, cloud fractions to percent, Pa to hPa and hourly solar J/m2 to mean W/m2.
 - Group by the objective's IANA local time zone returned by the other provider, including DST. Join providers by local calendar date.
 - Native 2m temperature and 10m wind are displayed separately. They are not adjusted to summit/mid/valley elevation. Wind is not a gust.

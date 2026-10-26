@@ -127,3 +127,18 @@ export function weatherNextInsight(forecast: any[] = []) {
     runStart: latest.runStart, coveredDays: days.length, contributingDays: contributing.length,
   };
 }
+
+/** Decode Earth Engine getRegion output by column name rather than fixed offsets. */
+export function weatherNextRegionPayload(raw: any) {
+  if (!raw || !Array.isArray(raw.table) || raw.table.length < 2 || !Array.isArray(raw.table[0])) throw new Error("WeatherNext point table is empty");
+  const header: string[] = raw.table[0];
+  const timeIndex = header.indexOf("time"), leadIndex = header.indexOf("forecast_hour_value");
+  if (timeIndex < 0 || leadIndex < 0 || WEATHER_NEXT_BANDS.some(b => !header.includes(b))) throw new Error("WeatherNext point table schema is incomplete");
+  const rows = raw.table.slice(1).filter(Array.isArray).map((row: any[]) => ({
+    runStart: raw.runStart,
+    validTime: finite(row[timeIndex]) ? new Date(row[timeIndex]).toISOString() : "",
+    forecastHour: row[leadIndex],
+    bands: Object.fromEntries(WEATHER_NEXT_BANDS.map(b => [b, row[header.indexOf(b)] ?? null])),
+  }));
+  return { runStart: raw.runStart, rows };
+}

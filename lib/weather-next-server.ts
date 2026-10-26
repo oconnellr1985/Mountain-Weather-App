@@ -3,7 +3,7 @@ import { getVercelOidcToken } from "@vercel/oidc";
 // The Earth Engine Node SDK is server-only and has no bundled TypeScript declarations.
 // @ts-ignore
 import ee from "@google/earthengine";
-import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION } from "./weather-next-data";
+import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION, weatherNextRegionPayload } from "./weather-next-data";
 
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 type Entry = { value?: any; expires: number; pending?: Promise<any> };
@@ -73,17 +73,16 @@ async function queryPoint(lat: number, lon: number) {
   const runStart = last.get("start_time");
   const run = collection.filter(ee.Filter.eq("start_time", runStart)).sort("forecast_hour").limit(360);
   const point = ee.Geometry.Point([lon, lat]);
-  const rows = run.toList(360).map((item: any) => {
+  // Extract a point table in one operation rather than launching 360 region reductions.
+  // getRegion uses system:time_start, so replace it with the actual valid timestamp.
+  const timed = run.map((item: any) => {
     const image = ee.Image(item);
-    const bands = image.select(WEATHER_NEXT_BANDS).reduceRegion({
-      reducer: ee.Reducer.first(), geometry: point, scale: 10000, maxPixels: 16,
-    });
-    return ee.Dictionary({
-      runStart: image.get("start_time"), validTime: image.get("end_time"),
-      forecastHour: image.get("forecast_hour"), bands,
-    });
+    return image.select(WEATHER_NEXT_BANDS)
+      .addBands(ee.Image.constant(ee.Number(image.get("forecast_hour"))).toInt16().rename("forecast_hour_value"))
+      .set("system:time_start", ee.Date(image.get("end_time")).millis());
   });
-  return evaluate(ee.Dictionary({ runStart, rows }));
+  const raw = await evaluate(ee.Dictionary({ runStart, table: timed.getRegion(point, 10000) }));
+  return weatherNextRegionPayload(raw);
 }
 export function safeWeatherNextError(error: any) {
   // Provider errors may include request headers/credentials; never return raw errors.
