@@ -33,7 +33,11 @@ def main():
     run(["gcloud", "auth", "application-default", "login", "--no-launch-browser",
          "--scopes=https://www.googleapis.com/auth/cloud-platform"])
     run(["gcloud", "auth", "application-default", "set-quota-project", PROJECT])
-    credential_path = pathlib.Path.home() / ".config/gcloud/application_default_credentials.json"
+    config_dir = run(["gcloud", "info", "--format=value(config.paths.global_config_dir)"],
+                     capture_output=True, text=True).stdout.strip()
+    credential_path = pathlib.Path(config_dir) / "application_default_credentials.json"
+    if not credential_path.is_file():
+        sys.exit("Google did not save application-default credentials in its active configuration.")
     credential = json.loads(credential_path.read_text())
     if credential.get("type") != "authorized_user" or not credential.get("refresh_token"):
         sys.exit("Google did not create a refreshable user credential. Nothing was sent to Vercel.")
