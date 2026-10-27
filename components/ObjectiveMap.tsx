@@ -29,7 +29,6 @@ export default function ObjectiveMap({ objectives, selected, onSelect }: { objec
       button.onclick = () => onSelect(objective.id);
       content.append(name, details, button);
       const marker = L.marker([objective.lat, objective.lon], { title: objective.name, alt: objective.name, icon: L.divIcon({ className: "objective-map-marker", html: `<span class="${active ? "objective-pin-selected" : "objective-pin"}"></span>`, iconSize: [24, 24], iconAnchor: [12, 12] }), zIndexOffset: active ? 1000 : 0 }).bindPopup(content, { maxWidth: 260 }).addTo(markers.current!);
-      if (active) marker.openPopup();
     });
     map.current.setView([selected.lat, selected.lon], 11);
   }, [objectives, selected.id, onSelect]);

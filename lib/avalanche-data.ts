@@ -30,7 +30,7 @@ export function normalizeAvcan(data: any, now = Date.now()) {
   const ratings = [last.alpine, last.treeline, last.belowTreeline].filter((v: any) => typeof v === "number");
   const hasCurrentRating = current && ratings.length > 0;
   return { status: !current ? "expired" : hasCurrentRating ? "available" : "unrated", source: report.forecaster || "Avalanche Canada", url,
-    bulletin: { issuedAt: report.dateIssued, validUntil: report.validUntil, note, problems, scope: "Regional forecast by elevation band; not a slope-specific assessment." }, avalancheHistory: hasCurrentRating ? rows : [],
+    bulletin: { issuedAt: report.dateIssued, validUntil: report.validUntil, timeZone: report.timezone, note, problems, scope: "Regional forecast by elevation band; not a slope-specific assessment." }, avalancheHistory: hasCurrentRating ? rows : [],
     summary: { headline: !current ? "The returned bulletin has expired; no current rating is used in scoring." : hasCurrentRating ? note : "Current seasonal statement — no numeric danger rating. " + note, riskScore: hasCurrentRating ? Math.max(...ratings) * 2 : null, hasCurrentRating, last: hasCurrentRating ? last : { alpine: null, treeline: null, problems }, persistentDays: 0, windSlabDays: 0 } };
 }
 function inRing(lon: number, lat: number, ring: number[][]) {
