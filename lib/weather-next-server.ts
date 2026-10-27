@@ -3,7 +3,7 @@ import { getVercelOidcToken } from "@vercel/oidc";
 // The Earth Engine Node SDK is server-only and has no bundled TypeScript declarations.
 // @ts-ignore
 import ee from "@google/earthengine";
-import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION, weatherNextRegionPayload } from "./weather-next-data";
+import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION, weatherNextRegionPayload, earthEngineGridSpec } from "./weather-next-data";
 
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 type Entry = { value?: any; expires: number; pending?: Promise<any> };
@@ -82,12 +82,20 @@ async function queryPoint(lat: number, lon: number) {
       .set("system:time_start", ee.Date(image.get("end_time")).millis());
   });
   const projection = ee.Image(run.first()).select(0).projection();
-  const raw = await evaluate(ee.Dictionary({
-    runStart,
-    // Sample the original cell, retaining its actual center and footprint.
-    table: timed.getRegion({ geometry: point, crs: projection.crs(), crsTransform: projection.transform() }),
-    grid: ee.Dictionary({ crs: projection.crs(), transform: projection.transform() }),
-  }));
+  // evaluate(Projection) supplies the six numeric coefficients. transform() returns WKT text.
+  let grid: any = null;
+  try { grid = earthEngineGridSpec(await evaluate(projection)); } catch { /* Metadata is optional. */ }
+  let raw: any;
+  if (grid) {
+    try {
+      raw = await evaluate(ee.Dictionary({ runStart,
+        table: timed.getRegion({ geometry: point, crs: grid.crs, crsTransform: grid.transform }),
+      }));
+    } catch { grid = null; }
+  }
+  // A projection/metadata failure must preserve the previously working weather extraction.
+  if (!raw) raw = await evaluate(ee.Dictionary({ runStart, table: timed.getRegion(point, 10000) }));
+  raw.grid = grid;
   return weatherNextRegionPayload(raw);
 }
 

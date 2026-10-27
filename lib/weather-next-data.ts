@@ -16,6 +16,12 @@ export const WEATHER_NEXT_BANDS = [
   "mean_sea_level_pressure_mean", "surface_solar_radiation_downwards_1hr_mean",
 ];
 export const finite = (v: any): v is number => typeof v === "number" && Number.isFinite(v);
+/** Projection.getInfo/evaluate supplies an affine array; Projection.transform() is WKT text. */
+export function earthEngineGridSpec(info: any) {
+  return info && typeof info.crs === "string" && Array.isArray(info.transform) &&
+    info.transform.length === 6 && info.transform.every(finite)
+    ? { crs: info.crs, transform: info.transform } : null;
+}
 const mean = (v: any[]) => { const a = v.filter(finite); return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null; };
 const maximum = (v: any[]) => { const a = v.filter(finite); return a.length ? Math.max(...a) : null; };
 const rounded = (v: any) => finite(v) ? Math.round(v * 10) / 10 : null;

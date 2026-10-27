@@ -1,10 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CHART_AXIS_FONT_SIZE, fieldSourceCounts, modelLabelsForMetric, modelLineStyle } from "../lib/forecast-display";
-import { weatherNextRegionPayload, WEATHER_NEXT_BANDS, normalizeWeatherNext } from "../lib/weather-next-data";
+import { weatherNextRegionPayload, WEATHER_NEXT_BANDS, normalizeWeatherNext, earthEngineGridSpec } from "../lib/weather-next-data";
 
 const gfs = { modelId: "gfs", modelLabel: "GFS", weight: 1, summitTempC: -16.8, summitWindKph: 30, precipMm: 4 };
 const wn = { modelId: "weathernext_3", modelLabel: "WeatherNext 3", weight: 0.75, includeInConsensus: true, summitTempC: null, summitWindKph: null, surfaceTempC: -5.7, surfaceWindKph: 6, precipMm: 2 };
+
+test("Earth Engine affine metadata rejects the WKT transform API and permits a safe extraction fallback", () => {
+  assert.equal(earthEngineGridSpec({ crs: "EPSG:4326", transform: "PARAM_MT[Affine]" }), null);
+  assert.equal(earthEngineGridSpec({ crs: "EPSG:4326", transform: [0.1, 0] }), null);
+  assert.deepEqual(earthEngineGridSpec({ type: "Projection", crs: "EPSG:4326", transform: [0.1, 0, -180, 0, -0.1, 90] }), { crs: "EPSG:4326", transform: [0.1, 0, -180, 0, -0.1, 90] });
+});
 
 test("WeatherNext has a stable distinct color and is omitted from unsupported summit legends", () => {
   assert.notEqual(modelLineStyle("weathernext_3").color, modelLineStyle("gfs").color);
