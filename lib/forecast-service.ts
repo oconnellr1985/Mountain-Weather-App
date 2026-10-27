@@ -436,6 +436,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   }
   return {
     source: "Direct model-specific Open-Meteo feeds, with Google WeatherNext 3 via Earth Engine when authorized. WeatherNext uses native grid surface temperature/wind; complete-day precipitation, cloud, pressure and solar means enter the weighted analysis as one additional source. No WeatherNext summit adjustment, snowfall split or freezing level is inferred. RAP remains NO DATA pending a direct connector.",
+    target: { latitude: lat, longitude: lon, elevationM: summitM, windBasis: "grid-cell 10m wind/gust; no summit interpolation", precipitationBasis: "grid-area total; no summit-specific correction" },
     unavailableModels, weatherNext, timeZone: successful.find(r => r.timeZone)?.timeZone,
     modelCatalog: models.map(model => ({
       id: model.id, label: model.label, provider: model.provider, maxLeadDays: model.maxLeadDays,

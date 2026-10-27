@@ -102,7 +102,7 @@ export function WeatherNextElevationNote({ climb, status = {}, compact = false }
     <p><strong>WeatherNext reference:</strong> 2m air temperature and 10m wind above the model's gridded terrain. <strong>Google model-terrain elevation: not supplied by this feed.</strong>{finite(climb?.summitM) ? " The objective target is " + climb.summitM.toLocaleString() + " m (summit)." : ""}</p>
     {sample && <p className="mt-1">Sampled cell center {sample.latitude.toFixed(3)}°, {sample.longitude.toFixed(3)}° · approximately {sample.widthKm.toFixed(1)} × {sample.heightKm.toFixed(1)} km.</p>}
     {terrain?.status === "available" ? <p className="mt-1">Independent terrain reference across this cell: mean approximately {terrain.referenceMeanM.toLocaleString()} m; range {terrain.referenceMinM.toLocaleString()}–{terrain.referenceMaxM.toLocaleString()} m (NASA/USGS SRTM DEM, sampled at 90m). These are terrain-context elevations, not a verified WeatherNext forecast altitude.</p> : <p className="mt-1">An independent terrain-elevation reference is currently unavailable.</p>}
-    {!compact && <p className="mt-2">A grid cell covers valleys, slopes and peaks; selecting summit coordinates does not request the summit's actual height. The 2m/10m figures are heights above the model surface, not elevations above sea level. No summit temperature correction or wind scaling is applied. Compare precipitation and cloud traces across models; use the summit forecasts for summit temperature and wind guidance.</p>}
+    {!compact && <p className="mt-2">A grid cell covers valleys, slopes and peaks; selecting summit coordinates does not request the summit's actual height. The 2m/10m figures are heights above the model surface, not elevations above sea level. No summit temperature correction or wind scaling is applied. Compare precipitation and cloud traces across models; use the other providers’ elevation-adjusted temperature and grid-wind guidance alongside official mountain forecasts.</p>}
   </div>;
 }
 
@@ -135,7 +135,7 @@ export default function WeatherNextPanel({ forecast = [], status = {}, climb }: 
           </tr>)}</tbody>
         </table>
       </div>
-      <p className="mt-2 text-xs text-slate-500">*Peak of hourly ensemble-mean 10m wind speeds; no gust or daily-maximum percentile is inferred. Temperature and wind are grid surface values and do not enter the summit/elevation consensus.</p>
+      <p className="mt-2 text-xs text-slate-500">*Peak of hourly ensemble-mean 10m wind speeds; no gust or daily-maximum percentile is inferred. WeatherNext temperature and wind are grid surface values, shown separately from the summit-temperature and grid-wind consensus.</p>
       <div className="my-4 flex flex-wrap items-center gap-2"><label htmlFor="weather-next-day" className="text-sm font-medium">Hourly ensemble detail</label>
         <select id="weather-next-day" value={selected.day.date} onChange={e => setChosenDate(e.target.value)} className="rounded-lg border px-3 py-2 text-sm">
           {rows.map(r => <option key={r.day.date} value={r.day.date}>{r.day.label} · {r.day.date}</option>)}

@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { finite } from "@/lib/weather-next-data";
 const show = (v: any, digits = 1) => finite(v) ? v.toFixed(digits) : "—";
-export default function WeatherNextLookback({ climb, timeZone, history, Chart }: any) {
+function WeatherNextHistoryData({ climb, timeZone, history, Chart }: any) {
   const [state, setState] = useState<any>({ loading: true });
   useEffect(() => {
     const controller = new AbortController();
@@ -22,7 +22,7 @@ export default function WeatherNextLookback({ climb, timeZone, history, Chart }:
   const wnTotal = paired.reduce((s: number, r: any) => s + r.precipMm, 0), referenceTotal = paired.reduce((s: number, r: any) => s + r.referencePrecipMm, 0);
   return <section className="space-y-4 rounded-2xl border border-fuchsia-200 bg-white p-5 shadow-sm" aria-label="WeatherNext historical guidance">
     <div><h3 className="font-semibold">WeatherNext 3 · 14-day historical comparison</h3><p className="mt-2 text-sm text-slate-600">Archived one-hour-ahead ensemble forecasts, not observations. Temperature and wind refer to the native grid surface, with no summit adjustment.</p>
-      <p className="mt-2 text-xs text-slate-500">Use this layer to cross-check precipitation timing and broad cloud/pressure patterns. It does not alter the summit snow, refreeze or melt scores above. Missing hours remain gaps.</p></div>
+      <p className="mt-2 text-xs text-slate-500">Use this layer only to cross-check broad precipitation, cloud and pressure patterns. Both this archive and the Open-Meteo recent-past layer are model estimates. Differences show model disagreement, not accuracy measured against observations. It does not alter the summit snow, refreeze or melt scores above. Missing hours remain gaps.</p></div>
     {state.loading ? <p className="text-sm text-slate-600" role="status">Loading WeatherNext archive…</p> : state.status !== "available" ? <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900" role="status">{state.message || "WeatherNext archive unavailable."}</p> : <>
       <p className="rounded-xl bg-fuchsia-50 p-3 text-sm text-fuchsia-950">{state.daysAvailable}/14 complete local days · {state.timeZone}.{paired.length ? ` Across ${paired.length} matching complete precipitation days, WeatherNext totals ${wnTotal.toFixed(1)} mm versus ${referenceTotal.toFixed(1)} mm in the Open-Meteo recent-past layer (${(wnTotal - referenceTotal) >= 0 ? "+" : ""}${(wnTotal - referenceTotal).toFixed(1)} mm).` : " No complete overlapping precipitation days are available for comparison."}</p>
       <div className="grid gap-4 lg:grid-cols-3">
@@ -34,4 +34,13 @@ export default function WeatherNextLookback({ climb, timeZone, history, Chart }:
       <details className="text-xs text-slate-500"><summary className="cursor-pointer">Source and method</summary><p className="mt-2">{state.note} Daily temperature extremes are extremes of hourly ensemble means, not member extremes; wind is not a gust. Precipitation intervals ending at local midnight count toward the preceding day.</p><p className="mt-2">{state.attribution}</p><a className="mt-2 inline-block underline" href="https://developers.google.com/earth-engine/datasets/catalog/projects_gcp-public-data-weathernext_assets_weathernext_3_0_0_0p1deg" target="_blank" rel="noreferrer">Google dataset and licence</a></details>
     </>}
   </section>;
+}
+
+export default function WeatherNextLookback(props: any) {
+  const [expanded, setExpanded] = useState(false);
+  return <div className="rounded-2xl border bg-white p-4 shadow-sm">
+    <button className="w-full text-left text-sm font-semibold text-fuchsia-900" aria-expanded={expanded} aria-controls="optional-weather-next-history" onClick={() => setExpanded(value => !value)}>{expanded ? "Hide" : "Show"} optional WeatherNext historical comparison</button>
+    <p className="mt-2 text-xs text-slate-500">Additional model context with limited value for route conditions. Local observations are needed to verify what happened on the mountain; this comparison does not affect the condition scores.</p>
+    {expanded && <div id="optional-weather-next-history" className="mt-4"><WeatherNextHistoryData {...props} /></div>}
+  </div>;
 }
