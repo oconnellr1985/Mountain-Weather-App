@@ -1,7 +1,19 @@
 import { NextResponse } from "next/server";
+import { normalizeAvcan, normalizeNwac, unavailableAvalanche } from "@/lib/avalanche-data";
 export const dynamic = "force-dynamic";
-function dangerNumber(x:any){const s=String(x||"").toLowerCase(); if(s.includes("extreme"))return 5;if(s.includes("high"))return 4;if(s.includes("considerable"))return 3;if(s.includes("moderate"))return 2;if(s.includes("low"))return 1;return 0}
-function problems(p:any){const a=p?.problems||p?.avalancheProblems||p?.danger?.problems||[]; return Array.isArray(a)?a.map((x:any)=>x?.type||x?.name||x?.problemType||"").filter(Boolean):[]}
-function summary(h:any[],note:string){const last=h[0]||{alpine:0,problems:[]}; return {headline:h.length?`Live avalanche bulletin loaded. ${note}`:note,riskScore:Math.min(10,(last.alpine||0)*2),last,persistentDays:h.filter(d=>(d.problems||[]).join(" ").toLowerCase().includes("persistent")).length,windSlabDays:h.filter(d=>(d.problems||[]).join(" ").toLowerCase().includes("wind")).length}}
-async function avcan(lat:number,lon:number){const res=await fetch(`https://api.avalanche.ca/forecasts/en/products/point?lat=${lat}&long=${lon}`,{cache:"no-store",headers:{"User-Agent":"mountain-window-app/2.0"}}); const text=await res.text(); let j:any={}; try{j=JSON.parse(text)}catch{j={raw:text}}; if(!res.ok)throw new Error(j?.message||j?.error||`${res.status} ${res.statusText}`); const products=Array.isArray(j?.products)?j.products:Array.isArray(j)?j:j?.product?[j.product]:[]; const history=products.slice(0,14).map((p:any,i:number)=>{const d=p?.danger||p?.dangerRatings||p?.ratings||{}; return {label:p?.validUntil||p?.validDate||p?.issued||p?.date||`Bulletin ${i+1}`,alpine:dangerNumber(d?.alp||d?.alpine||p?.alpine),treeline:dangerNumber(d?.tln||d?.treeline||p?.treeline),problems:problems(p),note:p?.summary||p?.headline||p?.highlights||"Live Avalanche Canada product."}}); return {source:"Avalanche Canada live point product",history}}
-export async function GET(req:Request){const u=new URL(req.url); const lat=Number(u.searchParams.get("lat")), lon=Number(u.searchParams.get("lon")); const region=u.searchParams.get("region")||"global"; if(!Number.isFinite(lat)||!Number.isFinite(lon))return NextResponse.json({error:"Missing or invalid lat/lon query parameters"},{status:400}); if(region==="usa")return NextResponse.json({status:"unavailable",source:"NWAC live API not enabled",avalancheHistory:[],summary:summary([],"NWAC automated bulletin ingestion is not enabled in this build. Review NWAC directly for current seasonal/spring statements.")}); try{const d=await avcan(lat,lon); return NextResponse.json({source:d.source,avalancheHistory:d.history,summary:summary(d.history,"Review original bulletin before field decisions.")})}catch(e:any){return NextResponse.json({status:"unavailable",source:"NO LIVE AVALANCHE DATA",avalancheHistory:[],summary:summary([],`Live avalanche feed unavailable: ${e?.message||"unknown error"}`)})}}
+export async function GET(req: Request) {
+  const u = new URL(req.url);
+  const read = (key: string) => u.searchParams.get(key)?.trim() ? Number(u.searchParams.get(key)) : NaN;
+  const lat = read("lat"), lon = read("lon");
+  if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) return NextResponse.json({ error: "Missing or invalid lat/lon query parameters" }, { status: 400 });
+  const usa = u.searchParams.get("region") === "usa";
+  const url = usa ? "https://api.avalanche.org/v2/public/products/map-layer/NWAC" : `https://api.avalanche.ca/forecasts/en/products/point?lat=${lat}&long=${lon}`;
+  let result;
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15000), headers: { "User-Agent": "Mountain-Weather-App/2.0" } });
+    if (!response.ok) throw new Error("Official feed unavailable");
+    const data = await response.json();
+    result = usa ? normalizeNwac(data, lat, lon) : normalizeAvcan(data);
+  } catch { result = unavailableAvalanche("The official avalanche feed could not be loaded. No danger rating is assumed; check the original bulletin.", usa ? "https://nwac.us/" : "https://avalanche.ca/", usa ? "NWAC via Avalanche.org" : "Avalanche Canada"); }
+  return NextResponse.json(result, { headers: { "Cache-Control": "private, no-store" } });
+}

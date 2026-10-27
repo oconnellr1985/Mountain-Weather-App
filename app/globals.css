@@ -2,3 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 body { margin: 0; }
+
+.objective-pin, .objective-pin-selected { display: block; width: 20px; height: 20px; margin: 2px; border: 3px solid white; border-radius: 50%; background: #2563eb; box-shadow: 0 1px 5px #334155; }
+.objective-pin-selected { background: #a21caf; width: 24px; height: 24px; margin: 0; }
+.leaflet-container { font: inherit; }
