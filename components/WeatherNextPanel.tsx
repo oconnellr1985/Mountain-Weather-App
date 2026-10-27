@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import { finite, WEATHER_NEXT_ID, weatherNextInsight } from "@/lib/weather-next-data";
 import { CHART_AXIS_FONT_SIZE, modelLineStyle } from "@/lib/forecast-display";
 import { usePlotWidth } from "./use-plot-width";
@@ -17,6 +17,8 @@ export function WeatherNextSummary({ forecast = [] }: { forecast?: any[] }) {
 
 function HourlyBand({ hours, meanKey, lowKey, highKey, title, unit, timeZone }: any) {
   const { ref: plotRef, width } = usePlotWidth();
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const tooltipId = useId();
   const values = hours.flatMap((h: any) => [h[meanKey], h[lowKey], h[highKey]]).filter(finite);
   if (!values.length) return <p className="text-sm text-slate-500">{title}: unavailable</p>;
   const lo = Math.min(...values), hi = Math.max(...values);
@@ -41,17 +43,55 @@ function HourlyBand({ hours, meanKey, lowKey, highKey, title, unit, timeZone }: 
     : null;
   const time = (h: any) => new Date(h.validTime).toLocaleTimeString("en-CA", { timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
   const tickIndices = width < 280 ? [0, hours.length - 1] : [0, Math.floor((hours.length - 1) / 2), hours.length - 1];
+  const active = activeIndex === null ? null : hours[activeIndex];
+  const selectHour = (event: React.PointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const position = (event.clientX - bounds.left) * width / bounds.width;
+    setActiveIndex(Math.max(0, Math.min(hours.length - 1, Math.round((position - left) / (right - left) * (hours.length - 1)))));
+  };
+  const navigateHour = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End", "Escape"].includes(event.key)) return;
+    event.preventDefault();
+    setActiveIndex(index => event.key === "Escape" ? null : event.key === "Home" ? 0 : event.key === "End" ? hours.length - 1 : Math.max(0, Math.min(hours.length - 1, (index ?? 0) + (event.key === "ArrowRight" ? 1 : -1))));
+  };
+  const tooltipWidth = Math.min(224, width - 16);
+  const tooltipLeft = activeIndex === null ? 8 : Math.max(8, Math.min(x(activeIndex) - tooltipWidth / 2, width - tooltipWidth - 8));
+  const valueText = (value: any) => finite(value) ? show(value, " " + unit, meanKey === "precipMm" ? 3 : 1) : "Unavailable";
   return <div className="min-w-0 rounded-xl border bg-white p-3">
     <h4 className="text-sm font-semibold">{title} · {unit}</h4>
-    <div ref={plotRef} className="min-w-0"><svg viewBox={"0 0 " + width + " 240"} preserveAspectRatio="none" role="img" aria-label={title + ": hourly ensemble mean and 10th–90th percentile range"} className="h-60 w-full" data-weather-next-plot>
+    <div ref={plotRef} className="relative min-w-0 rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-fuchsia-700" tabIndex={0} role="group"
+      aria-label={title + ": hover or tap for hourly values. Use left and right arrow keys to select an hour; Escape to dismiss."}
+      aria-describedby={active ? tooltipId : undefined}
+      style={{ touchAction: "pan-y" }}
+      onPointerMove={selectHour}
+      onPointerDown={event => { event.currentTarget.focus({ preventScroll: true }); selectHour(event); }}
+      onPointerLeave={event => { if (event.pointerType !== "touch") setActiveIndex(null); }}
+      onPointerCancel={() => setActiveIndex(null)}
+      onFocus={() => setActiveIndex(index => index ?? 0)}
+      onBlur={() => setActiveIndex(null)}
+      onKeyDown={navigateHour}>
+      <svg viewBox={"0 0 " + width + " 240"} preserveAspectRatio="none" role="img" aria-label={title + ": hourly ensemble mean and 10th–90th percentile range"} className="h-60 w-full" data-weather-next-plot>
       <title>{title}: hourly mean and P10–P90</title>
       <desc>The shaded band is the distribution at each individual forecast hour. It is not a range for a daily total or daily maximum.</desc>
       {[bottom, (bottom + top) / 2, top].map(v => <g key={v}><line x1={left} y1={y(v)} x2={right} y2={y(v)} stroke="#e2e8f0" /><text x={left - 8} y={y(v) + 4} textAnchor="end" fontSize={CHART_AXIS_FONT_SIZE} fill="#475569">{v.toFixed(1)}</text></g>)}
       {band && <polygon points={band} fill="#f5d0fe" opacity="0.8" />}
       {paths(meanKey).map((d, i) => <path key={i} d={d} fill="none" stroke={modelLineStyle(WEATHER_NEXT_ID).color} strokeWidth="2.5" />)}
+      {active && <g pointerEvents="none" aria-hidden="true">
+        <line x1={x(activeIndex!)} x2={x(activeIndex!)} y1="25" y2="195" stroke="#64748b" strokeDasharray="4 4" />
+        {finite(active[meanKey]) && <circle cx={x(activeIndex!)} cy={y(active[meanKey])} r="4" fill={modelLineStyle(WEATHER_NEXT_ID).color} stroke="white" strokeWidth="1.5" />}
+      </g>}
       {tickIndices.map((i, n) => <text key={n} x={x(i)} y="222" textAnchor={n === 0 ? "start" : n === tickIndices.length - 1 ? "end" : "middle"} fontSize={CHART_AXIS_FONT_SIZE} fill="#475569">{time(hours[i])}</text>)}
-    </svg></div>
-    <p className="text-xs text-slate-500">Magenta: ensemble mean · shaded: hourly P10–P90 · times in {timeZone}</p>
+      </svg>
+      {active && <div id={tooltipId} role="tooltip" className="pointer-events-none absolute top-2 rounded-xl border bg-white/95 p-3 text-xs text-slate-700 shadow-lg" style={{ left: tooltipLeft, width: tooltipWidth }}>
+        <p className="mb-1 font-semibold text-slate-950">{new Date(active.validTime).toLocaleString("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZoneName: "short" })}</p>
+        <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+          <dt>Mean</dt><dd className="text-right font-semibold">{valueText(active[meanKey])}</dd>
+          <dt>P10</dt><dd className="text-right">{valueText(active[lowKey])}</dd>
+          <dt>P90</dt><dd className="text-right">{valueText(active[highKey])}</dd>
+        </dl>
+      </div>}
+    </div>
+    <p className="text-xs text-slate-500">Magenta: ensemble mean · shaded: hourly P10–P90 · times in {timeZone}. Hover or tap for values.</p>
   </div>;
 }
 
@@ -101,7 +141,7 @@ export default function WeatherNextPanel({ forecast = [], status = {}, climb }: 
           {rows.map(r => <option key={r.day.date} value={r.day.date}>{r.day.label} · {r.day.date}</option>)}
         </select>
       </div>
-      <div className="grid gap-3 lg:grid-cols-3">
+      <div key={selected.day.date} className="grid gap-3 lg:grid-cols-3">
         <HourlyBand hours={value.hourly} meanKey="surfaceTempC" lowKey="surfaceTempP10C" highKey="surfaceTempP90C" title="2m surface temperature" unit="°C" timeZone={value.timeZone} />
         <HourlyBand hours={value.hourly} meanKey="surfaceWindKph" lowKey="surfaceWindP10Kph" highKey="surfaceWindP90Kph" title="10m surface wind" unit="km/h" timeZone={value.timeZone} />
         <HourlyBand hours={value.hourly} meanKey="precipMm" lowKey="precipP10Mm" highKey="precipP90Mm" title="Hourly precipitation" unit="mm" timeZone={value.timeZone} />
