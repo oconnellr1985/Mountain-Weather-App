@@ -162,6 +162,7 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     dayIndex: null,
     date,
     summitWindKph: peakWind,
+    windBasis: gust.length ? "daily_peak_gust" : "daily_peak_10m_wind",
     midWindKph: isNum(peakWind) ? peakWind * 0.75 : null,
     valleyWindKph: isNum(peakWind) ? peakWind * 0.45 : null,
     summitTempC: temp,
@@ -315,6 +316,11 @@ export function aggregate(results: any[]) {
       modelStats: {
         modelCount: allValues.length,
         consensusModelCount: basis.length,
+        fieldModelCounts: {
+          wind: basis.filter((v: any) => isNum(v.summitWindKph)).length,
+          temperature: basis.filter((v: any) => isNum(v.summitTempC)).length,
+          precipitation: basis.filter((v: any) => isNum(v.precipMm)).length,
+        },
         availableModels: allValues.map((value: any) => value.modelLabel),
         consensusModels: basis.map((value: any) => value.modelLabel),
         guidanceOnlyModels: allValues.filter((value: any) => value.includeInConsensus === false).map((value: any) => value.modelLabel),
@@ -415,6 +421,8 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
         status: normalized.stale ? "stale" : "available", runStart: normalized.runStart, timeZone,
         message: normalized.stale ? "WeatherNext run is over 24 hours old and excluded from consensus." : "",
         source: "Google Earth Engine", resolution: "0.1 degrees", horizonHours: 360,
+        targetElevationM: summitM, modelSurfaceElevationM: null,
+        sampling: normalized.sampling, terrainContext: normalized.terrainContext,
         note: WEATHER_NEXT_MODEL.note,
       };
     } catch {

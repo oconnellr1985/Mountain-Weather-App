@@ -2,6 +2,8 @@
 
 import React, { useState } from "react";
 import { finite, WEATHER_NEXT_ID, weatherNextInsight } from "@/lib/weather-next-data";
+import { CHART_AXIS_FONT_SIZE, modelLineStyle } from "@/lib/forecast-display";
+import { usePlotWidth } from "./use-plot-width";
 
 const show = (value: any, unit = "", digits = 1) => finite(value) ? value.toFixed(digits) + unit : "—";
 
@@ -14,12 +16,15 @@ export function WeatherNextSummary({ forecast = [] }: { forecast?: any[] }) {
 }
 
 function HourlyBand({ hours, meanKey, lowKey, highKey, title, unit, timeZone }: any) {
+  const { ref: plotRef, width } = usePlotWidth();
   const values = hours.flatMap((h: any) => [h[meanKey], h[lowKey], h[highKey]]).filter(finite);
   if (!values.length) return <p className="text-sm text-slate-500">{title}: unavailable</p>;
   const lo = Math.min(...values), hi = Math.max(...values);
-  const bottom = lo - Math.max((hi - lo) * 0.1, 1), top = hi + Math.max((hi - lo) * 0.1, 1);
-  const x = (i: number) => 52 + i * 590 / Math.max(1, hours.length - 1);
-  const y = (v: number) => 145 - (v - bottom) / (top - bottom) * 115;
+  const bottom = meanKey === "surfaceTempC" ? lo - Math.max((hi - lo) * 0.1, 1) : Math.max(0, lo - Math.max((hi - lo) * 0.1, 1));
+  const top = hi + Math.max((hi - lo) * 0.1, 1);
+  const left = 50, right = Math.max(left + 1, width - 15);
+  const x = (i: number) => left + i * (right - left) / Math.max(1, hours.length - 1);
+  const y = (v: number) => 195 - (v - bottom) / (top - bottom) * 170;
   const paths = (key: string) => {
     const segments: string[] = [];
     let current = "";
@@ -35,21 +40,33 @@ function HourlyBand({ hours, meanKey, lowKey, highKey, title, unit, timeZone }: 
       [...hours].reverse().map((h: any, i: number) => x(hours.length - 1 - i) + "," + y(h[lowKey]))).join(" ")
     : null;
   const time = (h: any) => new Date(h.validTime).toLocaleTimeString("en-CA", { timeZone, hour: "2-digit", minute: "2-digit", hour12: false });
-  return <div className="rounded-xl border bg-white p-3">
+  const tickIndices = width < 280 ? [0, hours.length - 1] : [0, Math.floor((hours.length - 1) / 2), hours.length - 1];
+  return <div className="min-w-0 rounded-xl border bg-white p-3">
     <h4 className="text-sm font-semibold">{title} · {unit}</h4>
-    <svg viewBox="0 0 680 180" role="img" aria-label={title + ": hourly ensemble mean and 10th–90th percentile range"} className="w-full">
+    <div ref={plotRef} className="min-w-0"><svg viewBox={"0 0 " + width + " 240"} preserveAspectRatio="none" role="img" aria-label={title + ": hourly ensemble mean and 10th–90th percentile range"} className="h-60 w-full" data-weather-next-plot>
       <title>{title}: hourly mean and P10–P90</title>
       <desc>The shaded band is the distribution at each individual forecast hour. It is not a range for a daily total or daily maximum.</desc>
-      {[bottom, (bottom + top) / 2, top].map(v => <g key={v}><line x1="52" y1={y(v)} x2="642" y2={y(v)} stroke="#e2e8f0" /><text x="47" y={y(v) + 4} textAnchor="end" fontSize="11" fill="#475569">{v.toFixed(1)}</text></g>)}
-      {band && <polygon points={band} fill="#ddd6fe" opacity="0.8" />}
-      {paths(meanKey).map((d, i) => <path key={i} d={d} fill="none" stroke="#6d28d9" strokeWidth="2.5" />)}
-      {[0, Math.floor((hours.length - 1) / 2), hours.length - 1].map((i, n) => <text key={n} x={x(i)} y="168" textAnchor="middle" fontSize="11" fill="#475569">{time(hours[i])}</text>)}
-    </svg>
-    <p className="text-xs text-slate-500">Purple: ensemble mean · shaded: hourly P10–P90 · times in {timeZone}</p>
+      {[bottom, (bottom + top) / 2, top].map(v => <g key={v}><line x1={left} y1={y(v)} x2={right} y2={y(v)} stroke="#e2e8f0" /><text x={left - 8} y={y(v) + 4} textAnchor="end" fontSize={CHART_AXIS_FONT_SIZE} fill="#475569">{v.toFixed(1)}</text></g>)}
+      {band && <polygon points={band} fill="#f5d0fe" opacity="0.8" />}
+      {paths(meanKey).map((d, i) => <path key={i} d={d} fill="none" stroke={modelLineStyle(WEATHER_NEXT_ID).color} strokeWidth="2.5" />)}
+      {tickIndices.map((i, n) => <text key={n} x={x(i)} y="222" textAnchor={n === 0 ? "start" : n === tickIndices.length - 1 ? "end" : "middle"} fontSize={CHART_AXIS_FONT_SIZE} fill="#475569">{time(hours[i])}</text>)}
+    </svg></div>
+    <p className="text-xs text-slate-500">Magenta: ensemble mean · shaded: hourly P10–P90 · times in {timeZone}</p>
   </div>;
 }
 
-export default function WeatherNextPanel({ forecast = [], status = {} }: { forecast?: any[]; status?: any }) {
+export function WeatherNextElevationNote({ climb, status = {}, compact = false }: { climb?: any; status?: any; compact?: boolean }) {
+  const terrain = status.terrainContext;
+  const sample = status.sampling;
+  return <div className={compact ? "mb-3 rounded-xl bg-violet-50 p-3 text-xs text-violet-950" : "my-3 rounded-xl border border-violet-200 bg-violet-50 p-3 text-sm text-violet-950"}>
+    <p><strong>WeatherNext reference:</strong> 2m air temperature and 10m wind above the model's gridded terrain. <strong>Google model-terrain elevation: not supplied by this feed.</strong>{finite(climb?.summitM) ? " The objective target is " + climb.summitM.toLocaleString() + " m (summit)." : ""}</p>
+    {sample && <p className="mt-1">Sampled cell center {sample.latitude.toFixed(3)}°, {sample.longitude.toFixed(3)}° · approximately {sample.widthKm.toFixed(1)} × {sample.heightKm.toFixed(1)} km.</p>}
+    {terrain?.status === "available" ? <p className="mt-1">Independent terrain reference across this cell: mean approximately {terrain.referenceMeanM.toLocaleString()} m; range {terrain.referenceMinM.toLocaleString()}–{terrain.referenceMaxM.toLocaleString()} m (NASA/USGS SRTM DEM, sampled at 90m). These are terrain-context elevations, not a verified WeatherNext forecast altitude.</p> : <p className="mt-1">An independent terrain-elevation reference is currently unavailable.</p>}
+    {!compact && <p className="mt-2">A grid cell covers valleys, slopes and peaks; selecting summit coordinates does not request the summit's actual height. The 2m/10m figures are heights above the model surface, not elevations above sea level. No summit temperature correction or wind scaling is applied. Compare precipitation and cloud traces across models; use the summit forecasts for summit temperature and wind guidance.</p>}
+  </div>;
+}
+
+export default function WeatherNextPanel({ forecast = [], status = {}, climb }: { forecast?: any[]; status?: any; climb?: any }) {
   const rows = forecast.map(d => ({ day: d, value: d.modelValues?.find((v: any) => v.modelId === WEATHER_NEXT_ID) })).filter(r => r.value);
   const [chosenDate, setChosenDate] = useState("");
   const selected = rows.find(r => r.day.date === chosenDate) || rows[0];
@@ -62,6 +79,7 @@ export default function WeatherNextPanel({ forecast = [], status = {} }: { forec
         {status.status === "available" ? "Live model data" : status.status === "stale" ? "Stale · excluded from analysis" : "Data unavailable"}
       </span>
     </div>
+    <WeatherNextElevationNote climb={climb} status={status} />
     {!rows.length ? <p className="mt-3 text-sm text-amber-900">{status.message || "WeatherNext has not returned data for this forecast. Existing model analysis remains available."}</p> : <>
       <p className="my-3 text-xs text-slate-600">Run initialized {new Date(value.runStart).toLocaleString("en-CA", { timeZone: "UTC", hour12: false })} UTC · local dates: {value.timeZone}. Complete, fresh local days contribute precipitation, cloud, pressure and solar means to consensus as one source (weight 0.75). Partial days and runs over 24 hours old are excluded.</p>
       <div className="overflow-x-auto rounded-xl border">

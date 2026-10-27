@@ -81,8 +81,43 @@ async function queryPoint(lat: number, lon: number) {
       .addBands(ee.Image.constant(ee.Number(image.get("forecast_hour"))).toInt16().rename("forecast_hour_value"))
       .set("system:time_start", ee.Date(image.get("end_time")).millis());
   });
-  const raw = await evaluate(ee.Dictionary({ runStart, table: timed.getRegion(point, 10000) }));
+  const projection = ee.Image(run.first()).select(0).projection();
+  const raw = await evaluate(ee.Dictionary({
+    runStart,
+    // Sample the original cell, retaining its actual center and footprint.
+    table: timed.getRegion({ geometry: point, crs: projection.crs(), crsTransform: projection.transform() }),
+    grid: ee.Dictionary({ crs: projection.crs(), transform: projection.transform() }),
+  }));
   return weatherNextRegionPayload(raw);
+}
+
+async function terrainContext(sampling: any) {
+  const empty = { status: "unavailable", modelSurfaceElevationM: null };
+  if (!sampling || sampling.latitude < -56 || sampling.latitude > 60) return empty;
+  const { longitude: lon, latitude: lat, widthDegrees: dx, heightDegrees: dy } = sampling;
+  const bounds = [lon - dx / 2, lat - dy / 2, lon + dx / 2, lat + dy / 2];
+  if (bounds[0] < -180 || bounds[2] > 180) return empty;
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    const stats: any = await Promise.race([
+      evaluate(ee.Image("USGS/SRTMGL1_003").select("elevation").reduceRegion({
+        reducer: ee.Reducer.mean().combine({ reducer2: ee.Reducer.minMax(), sharedInputs: true }),
+        geometry: ee.Geometry.Rectangle(bounds, null, false), scale: 90, maxPixels: 1000000,
+      })),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("Terrain metadata timeout")), 5000); }),
+    ]);
+    if (![stats.elevation_mean, stats.elevation_min, stats.elevation_max].every(Number.isFinite)) return empty;
+    return {
+      status: "available", modelSurfaceElevationM: null,
+      referenceMeanM: Math.round(stats.elevation_mean / 10) * 10,
+      referenceMinM: Math.round(stats.elevation_min / 10) * 10,
+      referenceMaxM: Math.round(stats.elevation_max / 10) * 10,
+      source: "NASA/USGS SRTM 30m DEM, sampled at 90m across the WeatherNext cell",
+      sourceAsset: "USGS/SRTMGL1_003", bounds,
+      note: "Independent terrain context, not Google's model orography. No elevation correction is applied.",
+    };
+  } catch { return empty; }
+  finally { clearTimeout(timer!); }
 }
 export function safeWeatherNextError(error: any) {
   // Provider errors may include request headers/credentials; never return raw errors.
@@ -103,10 +138,12 @@ export async function fetchWeatherNextPoint(lat: number, lon: number) {
   const pending = (async () => {
     let timer: ReturnType<typeof setTimeout>;
     try {
-      const value = await Promise.race([
+      const value: any = await Promise.race([
         queryPoint(lat, lon),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("WeatherNext query timeout")), 40000); }),
       ]);
+      // Optional DEM metadata must not suppress an otherwise valid forecast.
+      value.terrainContext = await terrainContext(value.sampling);
       cache.set(key, { value, expires: Date.now() + 20 * 60000 });
       // Bound per-instance memory; this cache is an optimization, not persistent storage.
       if (cache.size > 64) cache.delete(cache.keys().next().value);

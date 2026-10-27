@@ -104,7 +104,8 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
     };
   });
   if (!daily.length) throw new Error("WeatherNext returned no valid forecast hours for this objective");
-  return { model: WEATHER_NEXT_MODEL, daily, timeZone, runStart: new Date(runTime).toISOString(), stale };
+  return { model: WEATHER_NEXT_MODEL, daily, timeZone, runStart: new Date(runTime).toISOString(), stale,
+    sampling: payload.sampling || null, terrainContext: payload.terrainContext || null };
 }
 
 export function weatherNextInsight(forecast: any[] = []) {
@@ -140,5 +141,18 @@ export function weatherNextRegionPayload(raw: any) {
     forecastHour: row[leadIndex],
     bands: Object.fromEntries(WEATHER_NEXT_BANDS.map(b => [b, row[header.indexOf(b)] ?? null])),
   }));
-  return { runStart: raw.runStart, rows };
+  const first = raw.table[1];
+  const longitude = first[header.indexOf("longitude")], latitude = first[header.indexOf("latitude")];
+  const transform = raw.grid?.transform;
+  const sampling = finite(longitude) && finite(latitude) && raw.grid?.crs === "EPSG:4326" &&
+    Array.isArray(transform) && transform.length === 6 && transform.every(finite) &&
+    transform[1] === 0 && transform[3] === 0 && Math.abs(transform[0]) > 0 && Math.abs(transform[4]) > 0 &&
+    Math.abs(transform[0]) <= 1 && Math.abs(transform[4]) <= 1
+    ? {
+      longitude: ((longitude + 180) % 360 + 360) % 360 - 180, latitude,
+      widthDegrees: Math.abs(transform[0]), heightDegrees: Math.abs(transform[4]),
+      widthKm: Math.abs(transform[0]) * 111.32 * Math.cos(latitude * Math.PI / 180),
+      heightKm: Math.abs(transform[4]) * 111.32,
+    } : null;
+  return { runStart: raw.runStart, rows, sampling, modelSurfaceElevationM: null };
 }
