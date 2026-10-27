@@ -3,7 +3,7 @@ import { getVercelOidcToken } from "@vercel/oidc";
 // The Earth Engine Node SDK is server-only and has no bundled TypeScript declarations.
 // @ts-ignore
 import ee from "@google/earthengine";
-import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION, weatherNextRegionPayload, earthEngineGridSpec } from "./weather-next-data";
+import { WEATHER_NEXT_BANDS, WEATHER_NEXT_COLLECTION, weatherNextRegionPayload, earthEngineGridSpec, localDate } from "./weather-next-data";
 
 const SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 type Entry = { value?: any; expires: number; pending?: Promise<any> };
@@ -154,6 +154,48 @@ export async function fetchWeatherNextPoint(lat: number, lon: number) {
       value.terrainContext = await terrainContext(value.sampling);
       cache.set(key, { value, expires: Date.now() + 20 * 60000 });
       // Bound per-instance memory; this cache is an optimization, not persistent storage.
+      if (cache.size > 64) cache.delete(cache.keys().next().value);
+      return value;
+    } catch (error) { cache.delete(key); throw error; }
+    finally { clearTimeout(timer!); }
+  })();
+  cache.set(key, { expires: 0, pending });
+  return pending;
+}
+
+/** Historical model guidance is queried separately so the forecast does not wait for it. */
+export async function fetchWeatherNextHistoryPoint(lat: number, lon: number, timeZone: string) {
+  const { decodeWeatherNextHistory, normalizeWeatherNextHistory } = await import("./weather-next-history");
+  const config = weatherNextConfiguration();
+  if (!config.ready) throw new Error(config.message);
+  const key = "history:" + lat.toFixed(4) + "," + lon.toFixed(4) + ":" + timeZone + ":" + localDate(Date.now(), timeZone);
+  const hit = cache.get(key);
+  if (hit?.pending) return hit.pending;
+  if (hit?.value && hit.expires > Date.now()) return hit.value;
+  const pending = (async () => {
+    let timer: ReturnType<typeof setTimeout>;
+    try {
+      const query = async () => {
+        await initialize();
+        const cutoff = new Date(Date.now() - 17 * 86400000).toISOString().replace(".000Z", "Z");
+        const collection = ee.ImageCollection(WEATHER_NEXT_COLLECTION).filter(ee.Filter.gte("start_time", cutoff)).filter(ee.Filter.eq("forecast_hour", 1)).sort("end_time").limit(432);
+        const timed = collection.map((item: any) => {
+          const image = ee.Image(item);
+          return image.select(WEATHER_NEXT_BANDS)
+            .addBands(ee.Image.constant(1).toInt16().rename("forecast_hour_value"))
+            .addBands(ee.Image.constant(ee.Date(image.get("start_time")).millis()).toDouble().rename("run_start_millis"))
+            .set("system:time_start", ee.Date(image.get("end_time")).millis());
+        });
+        let grid: any = null;
+        try { grid = earthEngineGridSpec(await evaluate(ee.Image(collection.first()).select(0).projection())); } catch { }
+        const point = ee.Geometry.Point([lon, lat]);
+        let table: any;
+        if (grid) { try { table = await evaluate(timed.getRegion({ geometry: point, crs: grid.crs, crsTransform: grid.transform })); } catch { grid = null; } }
+        if (!table) table = await evaluate(timed.getRegion(point, 10000));
+        return normalizeWeatherNextHistory(decodeWeatherNextHistory({ table, grid }), timeZone);
+      };
+      const value = await Promise.race([query(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("WeatherNext archive timeout")), 45000); })]);
+      cache.set(key, { value, expires: Date.now() + 3600000 });
       if (cache.size > 64) cache.delete(cache.keys().next().value);
       return value;
     } catch (error) { cache.delete(key); throw error; }
