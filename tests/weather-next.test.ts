@@ -113,7 +113,17 @@ test("malformed data and provider errors fail safely without leaking secrets", (
   assert.throws(() => normalizeWeatherNext(payload(), "Bogus/Timezone", now));
   assert.ok(!safeWeatherNextError(new Error("request failed Authorization Bearer secret-123")).includes("secret-123"));
   assert.match(safeWeatherNextError(new Error("403 permission denied")), /cannot read WeatherNext/);
-  assert.equal(weatherNextConfiguration().ready, false);
+  // Configuration availability depends on Vercel environment: production is
+  // deliberately authorized, preview usually is not. Validate fail-closed behavior
+  // under an explicit disabled setting instead of assuming production is unconfigured.
+  const originalEnabled = process.env.WEATHERNEXT_ENABLED;
+  try {
+    process.env.WEATHERNEXT_ENABLED = "false";
+    assert.equal(weatherNextConfiguration().ready, false);
+  } finally {
+    if (originalEnabled === undefined) delete process.env.WEATHERNEXT_ENABLED;
+    else process.env.WEATHERNEXT_ENABLED = originalEnabled;
+  }
 });
 
 test("point-table extraction preserves valid times, lead hours and nulls independent of column order", () => {
