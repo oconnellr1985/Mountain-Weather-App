@@ -32,10 +32,10 @@ export function buildForecastCautions(days: any[], maxWindKph = 30, maxDailyPrec
     const alerts: any[] = [];
     const precip = spreadRange((day.modelValues || []).filter((m: any) => m.includeInConsensus !== false).map((m: any) => m.precipMm));
     const gusts = spreadRange((day.modelValues || []).filter((m: any) => m.includeInConsensus !== false).map((m: any) => m.summitWindKph));
-    if (precip.count >= 3 && precip.spread !== null && precip.spread >= Math.max(5, maxDailyPrecipMm)) {
+    if (precip.count >= 2 && precip.spread !== null && precip.spread >= Math.max(5, maxDailyPrecipMm)) {
       alerts.push({ date: day.date, dayIndex: day.dayIndex, kind: "precipitation", severity: "review", label: `${day.label} · precip ${precip.low?.toFixed(1)}–${precip.high?.toFixed(1)} mm (${precip.count} models)`, detail: "Large full-day precipitation disagreement: review snowfall, timing and route consequences before trusting a window score." });
     }
-    if (gusts.count >= 3 && gusts.spread !== null && gusts.spread >= Math.max(20, maxWindKph * 0.6)) {
+    if (gusts.count >= 2 && gusts.spread !== null && gusts.spread >= Math.max(20, maxWindKph * 0.6)) {
       alerts.push({ date: day.date, dayIndex: day.dayIndex, kind: "wind", severity: "review", label: `${day.label} · peak 10 m gust ${gusts.low?.toFixed(0)}–${gusts.high?.toFixed(0)} km/h (${gusts.count} models)`, detail: "Models disagree on grid-cell gusts; local terrain effects and wind exposure are unresolved." });
     }
     const partialHeavy = (day.modelValues || []).filter((m: any) => m.dailyCoverage?.complete === false && finiteNumber(m.precipMm) && m.precipMm >= Math.max(10, maxDailyPrecipMm));
