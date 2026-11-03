@@ -33,6 +33,10 @@ export function localDate(instant: number | string, timeZone: string) {
   const part = (type: string) => parts.find(p => p.type === type)?.value;
   return part("year") + "-" + part("month") + "-" + part("day");
 }
+export function accumulationDate(valid: number, timeZone: string) {
+  return localDate(valid - 1, timeZone);
+}
+
 export function expectedHours(date: string, timeZone: string) {
   // Count actual hourly instants, including the 23/25-hour days at DST transitions.
   const anchor = Date.parse(date + "T00:00:00Z");
@@ -47,6 +51,7 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
   const stale = now - runTime > 24 * 3600000;
   const today = localDate(now, timeZone);
   const dates = new Map<string, any[]>();
+  const precipDates = new Map<string, any[]>();
   const seen = new Set<number>();
   for (const row of payload.rows) {
     const valid = Date.parse(row.validTime); // end_time, never system:time_start
@@ -77,6 +82,9 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
       shortwaveRadiationWm2: convert(b.surface_solar_radiation_downwards_1hr_mean, 1 / 3600),
     };
     if (!finite(hour.surfaceTempC) && !finite(hour.precipMm) && !finite(hour.surfaceWindKph)) continue;
+    const precipDate = accumulationDate(valid, timeZone);
+    if (!precipDates.has(precipDate)) precipDates.set(precipDate, []);
+    precipDates.get(precipDate)!.push(hour);
     if (!dates.has(date)) dates.set(date, []);
     dates.get(date)!.push(hour);
   }
@@ -86,13 +94,16 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
     const complete = hours.length === expected;
     const full = (key: string) => complete && hours.every(h => finite(h[key]));
     // Partial-day accumulation must not be compared with the other models' full-day totals.
-    const precip = full("precipMm") ? hours.reduce((sum, h) => sum + h.precipMm, 0) : null;
+    const precipHours = precipDates.get(date) || [];
+    const sampledPrecip = precipHours.length && precipHours.every(h => finite(h.precipMm))
+      ? precipHours.reduce((sum, h) => sum + h.precipMm, 0) : null;
+    const precip = precipHours.length === expected ? sampledPrecip : null;
     const dailyMean = (key: string) => full(key) ? rounded(mean(hours.map(h => h[key]))) : null;
     return {
       modelId: WEATHER_NEXT_ID, modelLabel: WEATHER_NEXT_MODEL.label, provider: WEATHER_NEXT_MODEL.provider,
-      weight: WEATHER_NEXT_MODEL.weight, includeInConsensus: complete && !stale,
+      weight: WEATHER_NEXT_MODEL.weight, includeInConsensus: !stale && (complete || finite(precip)),
       date, dayIndex: i + 1, runStart: new Date(runTime).toISOString(), timeZone, stale,
-      completeDay: complete, hoursAvailable: hours.length, expectedHours: expected,
+      completeDay: complete, hoursAvailable: hours.length, expectedHours: expected, precipHoursAvailable: precipHours.length,
       validFrom: hours[0].validTime, validTo: hours[hours.length - 1].validTime,
       surfaceTempC: rounded(mean(hours.map(h => h.surfaceTempC))),
       surfaceWindKph: rounded(maximum(hours.map(h => h.surfaceWindKph))),
@@ -100,7 +111,7 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
       summitTempC: null, summitTempMinC: null, summitTempMaxC: null, midTempC: null, valleyTempC: null,
       summitWindKph: null, midWindKph: null, valleyWindKph: null,
       summitRainMm: null, summitSnowCm: null, freezingLevelM: null,
-      precipMm: rounded(precip), sampledPrecipMm: hours.every(h => finite(h.precipMm)) ? rounded(hours.reduce((s, h) => s + h.precipMm, 0)) : null,
+      precipMm: rounded(precip), sampledPrecipMm: rounded(sampledPrecip),
       cloudCoverPct: dailyMean("cloudCoverPct"), cloudCoverLowPct: dailyMean("cloudCoverLowPct"),
       cloudCoverMidPct: dailyMean("cloudCoverMidPct"), cloudCoverHighPct: dailyMean("cloudCoverHighPct"),
       pressureHpa: dailyMean("pressureHpa"), shortwaveRadiationWm2: dailyMean("shortwaveRadiationWm2"),
@@ -110,7 +121,7 @@ export function normalizeWeatherNext(payload: any, timeZone: string, now = Date.
     };
   });
   if (!daily.length) throw new Error("WeatherNext returned no valid forecast hours for this objective");
-  return { model: WEATHER_NEXT_MODEL, daily, timeZone, runStart: new Date(runTime).toISOString(), stale,
+  return { model: WEATHER_NEXT_MODEL, daily, latestValidTime: new Date(Math.max(...Array.from(seen))).toISOString(), timeZone, runStart: new Date(runTime).toISOString(), stale,
     sampling: payload.sampling || null, terrainContext: payload.terrainContext || null };
 }
 

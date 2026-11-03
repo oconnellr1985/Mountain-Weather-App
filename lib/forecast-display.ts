@@ -34,3 +34,17 @@ export function fieldSourceCounts(day: any) {
   const count = (key: string) => values.filter((m: any) => typeof m[key] === "number" && Number.isFinite(m[key])).length;
   return { wind: count("summitWindKph"), temperature: count("summitTempC"), precipitation: count("precipMm") };
 }
+
+export function hasWindowPrecipitation(days: any[]) {
+  return days.every(day => Number.isFinite(day.precipGfsMm) && Number.isFinite(day.precipEcmwfMm));
+}
+
+export function weatherNextContributingFields(row: any) {
+  if (!row?.includeInConsensus) return [];
+  return [
+    ["precipMm", "precip"],
+    ["cloudCoverPct", "cloud"],
+    ["pressureHpa", "pressure"],
+    ["shortwaveRadiationWm2", "solar"],
+  ].filter(([key]) => Number.isFinite(row[key])).map(([, label]) => label);
+}

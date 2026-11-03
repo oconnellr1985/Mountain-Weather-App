@@ -63,15 +63,25 @@ function evaluate(value: any) {
     value.evaluate((result: any, error: any) => error ? reject(new Error(String(error))) : resolve(result));
   });
 }
-async function queryPoint(lat: number, lon: number) {
+async function queryPoint(lat: number, lon: number, interim = false) {
   await initialize();
   const cutoff = new Date(Date.now() - 72 * 3600000).toISOString().replace(".000Z", "Z");
   const collection = ee.ImageCollection(WEATHER_NEXT_COLLECTION)
     .filter(ee.Filter.gte("start_time", cutoff));
   // Interim runs only reach 48h. Select a completed 360h main cycle for the whole app horizon.
-  const last = collection.filter(ee.Filter.eq("forecast_hour", 360)).sort("start_time", false).first();
+  const candidates = interim ? collection.map((item: any) => {
+    const hour = ee.Date(item.get("start_time")).get("hour");
+    return item.set("is_interim", ee.Number(hour).mod(6).neq(0));
+  }).filter(ee.Filter.eq("is_interim", 1)) : collection;
+  const last = candidates.filter(ee.Filter.eq("forecast_hour", interim ? 48 : 360)).sort("start_time", false).first();
   const runStart = last.get("start_time");
-  const run = collection.filter(ee.Filter.eq("start_time", runStart)).sort("forecast_hour").limit(360);
+  let ingestionTime: number | null = null;
+  if (interim) {
+    const metadata = await evaluate(last.toDictionary(["start_time", "ingestion_time_utc"]));
+    if (!metadata.start_time) return null;
+    ingestionTime = Number.isFinite(metadata.ingestion_time_utc) ? metadata.ingestion_time_utc : null;
+  }
+  const run = collection.filter(ee.Filter.eq("start_time", runStart)).sort("forecast_hour").limit(interim ? 48 : 360);
   const point = ee.Geometry.Point([lon, lat]);
   // Extract a point table in one operation rather than launching 360 region reductions.
   // getRegion uses system:time_start, so replace it with the actual valid timestamp.
@@ -96,7 +106,7 @@ async function queryPoint(lat: number, lon: number) {
   // A projection/metadata failure must preserve the previously working weather extraction.
   if (!raw) raw = await evaluate(ee.Dictionary({ runStart, table: timed.getRegion(point, 10000) }));
   raw.grid = grid;
-  return weatherNextRegionPayload(raw);
+  return { ...weatherNextRegionPayload(raw), ingestionTime };
 }
 
 async function terrainContext(sampling: any) {
@@ -136,22 +146,22 @@ export function safeWeatherNextError(error: any) {
   if (/quota|429|too many/i.test(message)) return "WeatherNext quota is temporarily unavailable; other model forecasts remain available.";
   return "WeatherNext could not be loaded from Earth Engine; other model forecasts remain available.";
 }
-export async function fetchWeatherNextPoint(lat: number, lon: number) {
+export async function fetchWeatherNextPoint(lat: number, lon: number, interim = false) {
   const config = weatherNextConfiguration();
   if (!config.ready) throw new Error(config.message);
-  const key = lat.toFixed(4) + "," + lon.toFixed(4);
+  const key = (interim ? "interim:" : "") + lat.toFixed(4) + "," + lon.toFixed(4);
   const hit = cache.get(key);
   if (hit?.pending) return hit.pending;
-  if (hit?.value && hit.expires > Date.now()) return hit.value;
+  if (hit && hit.expires > Date.now()) return hit.value;
   const pending = (async () => {
     let timer: ReturnType<typeof setTimeout>;
     try {
       const value: any = await Promise.race([
-        queryPoint(lat, lon),
+        queryPoint(lat, lon, interim),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("WeatherNext query timeout")), 40000); }),
       ]);
       // Optional DEM metadata must not suppress an otherwise valid forecast.
-      value.terrainContext = await terrainContext(value.sampling);
+      if (value && !interim) value.terrainContext = await terrainContext(value.sampling);
       cache.set(key, { value, expires: Date.now() + 20 * 60000 });
       // Bound per-instance memory; this cache is an optimization, not persistent storage.
       if (cache.size > 64) cache.delete(cache.keys().next().value);
@@ -164,25 +174,32 @@ export async function fetchWeatherNextPoint(lat: number, lon: number) {
 }
 
 /** Historical model guidance is queried separately so the forecast does not wait for it. */
-export async function fetchWeatherNextHistoryPoint(lat: number, lon: number, timeZone: string) {
+export async function fetchWeatherNextHistoryPoint(lat: number, lon: number, timeZone: string, lead = 1, now = Date.now()) {
   const { decodeWeatherNextHistory, normalizeWeatherNextHistory } = await import("./weather-next-history");
   const config = weatherNextConfiguration();
   if (!config.ready) throw new Error(config.message);
-  const key = "history:" + lat.toFixed(4) + "," + lon.toFixed(4) + ":" + timeZone + ":" + localDate(Date.now(), timeZone);
+  const key = "history:" + lat.toFixed(4) + "," + lon.toFixed(4) + ":" + timeZone + ":" + localDate(now, timeZone) + ":" + lead;
   const hit = cache.get(key);
   if (hit?.pending) return hit.pending;
-  if (hit?.value && hit.expires > Date.now()) return hit.value;
+  if (hit && hit.expires > Date.now()) return hit.value;
   const pending = (async () => {
     let timer: ReturnType<typeof setTimeout>;
     try {
       const query = async () => {
         await initialize();
-        const cutoff = new Date(Date.now() - 17 * 86400000).toISOString().replace(".000Z", "Z");
-        const collection = ee.ImageCollection(WEATHER_NEXT_COLLECTION).filter(ee.Filter.gte("start_time", cutoff)).filter(ee.Filter.eq("forecast_hour", 1)).sort("end_time").limit(432);
+        const cutoff = new Date(now - 18 * 86400000).toISOString().replace(".000Z", "Z");
+        const archive = ee.ImageCollection(WEATHER_NEXT_COLLECTION).filter(ee.Filter.gte("start_time", cutoff));
+        // Main cycles arrive every six hours. Each valid hour has one main-cycle
+        // forecast in the six-hour lead band, including beyond interim coverage.
+        const selected = lead === 1 ? archive.filter(ee.Filter.eq("forecast_hour", 1)) :
+          archive.filter(ee.Filter.gte("forecast_hour", lead)).filter(ee.Filter.lt("forecast_hour", lead + 6))
+            .map((item: any) => item.set("cycle_hour", ee.Date(item.get("start_time")).get("hour")))
+            .filter(ee.Filter.inList("cycle_hour", [0, 6, 12, 18]));
+        const collection = selected.sort("end_time").limit(456);
         const timed = collection.map((item: any) => {
           const image = ee.Image(item);
-          return image.select(WEATHER_NEXT_BANDS)
-            .addBands(ee.Image.constant(1).toInt16().rename("forecast_hour_value"))
+          return image.select(lead === 1 ? WEATHER_NEXT_BANDS : ["total_precipitation_1hr_mean"])
+            .addBands(ee.Image.constant(ee.Number(image.get("forecast_hour"))).toInt16().rename("forecast_hour_value"))
             .addBands(ee.Image.constant(ee.Date(image.get("start_time")).millis()).toDouble().rename("run_start_millis"))
             .set("system:time_start", ee.Date(image.get("end_time")).millis());
         });
@@ -192,7 +209,8 @@ export async function fetchWeatherNextHistoryPoint(lat: number, lon: number, tim
         let table: any;
         if (grid) { try { table = await evaluate(timed.getRegion({ geometry: point, crs: grid.crs, crsTransform: grid.transform })); } catch { grid = null; } }
         if (!table) table = await evaluate(timed.getRegion(point, 10000));
-        return normalizeWeatherNextHistory(decodeWeatherNextHistory({ table, grid }), timeZone);
+        const payload = decodeWeatherNextHistory({ table, grid });
+        return lead === 1 ? normalizeWeatherNextHistory(payload, timeZone, now) : payload;
       };
       const value = await Promise.race([query(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("WeatherNext archive timeout")), 45000); })]);
       cache.set(key, { value, expires: Date.now() + 3600000 });

@@ -42,7 +42,7 @@ For a keyless service-account deployment, omit GOOGLE_CREDENTIALS_JSON and confi
 - Other providers are requested with the objective summit elevation through Open-Meteo's statistical downscaling. The app's wind trace uses daily peak gust where present, falling back to peak 10m speed; it does not vertically interpolate wind to summit height. Temperature height and wind statistic differences are stated explicitly in the model table.
 - Raw summit charts omit WeatherNext because it has no summit temperature/wind values. Common precipitation and cloud charts include it with a stable magenta style. Legends grow with their contents and wrap on mobile. SVG chart coordinates follow the rendered width to keep axis labels at 12 CSS pixels.
 - The window watch shows source counts separately for wind, temperature and precipitation, and identifies whether WeatherNext contributes on each day. WeatherNext affects compatible precipitation, cloud, pressure and solar scoring inputs plus precipitation-disagreement confidence; it does not affect summit temperature/wind or rain/snow/freezing-level values.
-- Fresh, complete local days add precipitation, total/layer cloud, sea-level pressure and shortwave radiation to per-field weighted consensus. Missing fields stay null. Partial-day precipitation never substitutes for a full-day total.
+- Fresh runs add precipitation, total/layer cloud, sea-level pressure and shortwave radiation to per-field weighted consensus when the corresponding local-day coverage is complete. Missing fields stay null. Partial-day precipitation never substitutes for a full-day total.
 - The provisional WeatherNext weight is 0.75: one ensemble is one source, rather than 64 independent models. This is not a validated skill-based weight.
 - Precipitation disagreement enters the existing confidence calculation; compatible weighted fields feed route scores, visibility, solar analysis and window ranking. The summary reports the precipitation-consensus change with and without WeatherNext.
 - Rain/snow split and freezing level remain unavailable. No values are invented from surface temperature.
@@ -67,3 +67,11 @@ Tests cover SI conversion, actual valid times, missing values, partial days, DST
 - [WeatherNext terms](https://storage.googleapis.com/weathernext-public/terms-of-use.pdf)
 
 WeatherNext is experimental supplementary guidance. Official alerts, forecasts, avalanche bulletins and current observations remain necessary for mountain decisions.
+
+## Forecast timing and station verification
+
+Forecast precipitation uses the local day of the accumulation interval, including the interval ending at the following midnight. Coverage is checked separately from instantaneous fields. Missing precipitation remains unavailable in consensus and blocks ranking or alerts for windows spanning that day.
+
+The raw WeatherNext panel can compare the latest published interim cycle with the main forecast over matching future hours. It shows the initialization, valid coverage, and the 48-hour asset's Earth Engine publication lag when available. Interim guidance is independent of scoring and alerts.
+
+Lookback offers an independent station comparison. Enter an ECCC climate identifier for a representative station with hourly precipitation. WeatherNext is sampled at the station. Main-cycle forecasts in the 24–29, 48–53 and 72–77 hour lead bands allow hourly coverage even beyond the 48-hour interim horizon. Occurrence uses a 0.2 mm hourly threshold, and daily bias and absolute error require a complete matched local day. Sparse stations or recent reporting delays can leave a gap. The comparison does not tune model weights automatically.

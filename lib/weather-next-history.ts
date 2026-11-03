@@ -1,4 +1,4 @@
-import { expectedHours, finite, localDate, weatherNextRegionPayload } from "./weather-next-data";
+import { accumulationDate, expectedHours, finite, localDate, weatherNextRegionPayload } from "./weather-next-data";
 const HOUR = 3600000;
 export function lookbackDates(timeZone: string, now = Date.now()) {
   const today = localDate(now, timeZone);
@@ -28,7 +28,7 @@ export function normalizeWeatherNextHistory(payload: any, timeZone: string, now 
     const expected = expectedHours(date, timeZone);
     const hours = Array.from(samples.entries()).filter(([valid]) => localDate(valid, timeZone) === date).map(([, row]) => row);
     // Accumulations end at validTime: the interval ending at local midnight belongs to the preceding day.
-    const precipHours = Array.from(samples.entries()).filter(([valid]) => localDate(valid - 1, timeZone) === date).map(([, row]) => row);
+    const precipHours = Array.from(samples.entries()).filter(([valid]) => accumulationDate(valid, timeZone) === date).map(([, row]) => row);
     const field = (band: string, factor = 1, offset = 0) => hours.length === expected ? round((v => finite(v) ? v * factor + offset : null)(mean(hours.map(h => h.bands?.[band])))) : null;
     const temps = hours.map(h => h.bands?.temperature_2m_mean);
     const wind = hours.map(h => h.bands?.wind_speed_10m_mean);

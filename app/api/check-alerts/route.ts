@@ -17,7 +17,7 @@ export async function GET(req: Request) {
   try {
     const weather = await getWeather(climb);
     const best = findBestWindow(climb, weather.history, weather.forecast);
-    const shouldAlert = best.quality >= minQuality && best.confidence >= minConfidence;
+    const shouldAlert = best.label !== "NO DATA" && best.quality >= minQuality && best.confidence >= minConfidence;
     if (!shouldAlert) return NextResponse.json({ ok: true, sent: false, best, reason: "Thresholds not met" });
     const text = buildAlertText(climb, best, weather.source);
     await sendBoth(`${climb.name}: possible window ${best.label}`, text);
