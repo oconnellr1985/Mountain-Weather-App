@@ -268,7 +268,10 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
   });
 
   const elevationData = surfaceRows.slice(1).map(row => row.hourly || {});
-  const tempAtDay = (hourly: any, date: string) => avg((hourly.time || []).map((t: string, i: number) => dayKey(t) === date ? hourly.temperature_2m?.[i] : null));
+  const temperatureAtDay = (hourly: any, date: string) => {
+    const values = (hourly.time || []).map((t: string, i: number) => dayKey(t) === date ? hourly.temperature_2m?.[i] : null);
+    return { average: avg(values), min: min(values), max: max(values) };
+  };
   const profileIndices = (date: string) => (upperAir?.time || []).flatMap((t: string, i: number) => dayKey(t) === date ? [i] : []);
   const daily = Array.from(byDay.entries())
     .sort(([a], [b]) => a.localeCompare(b))
@@ -277,8 +280,14 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
-        row.midTempC = elevationData[0] ? tempAtDay(elevationData[0], date) : null;
-        row.valleyTempC = elevationData[1] ? tempAtDay(elevationData[1], date) : null;
+        const middle = elevationData[0] ? temperatureAtDay(elevationData[0], date) : null;
+        const lower = elevationData[1] ? temperatureAtDay(elevationData[1], date) : null;
+        row.midTempC = middle?.average ?? null;
+        row.midTempMinC = middle?.min ?? null;
+        row.midTempMaxC = middle?.max ?? null;
+        row.valleyTempC = lower?.average ?? null;
+        row.valleyTempMinC = lower?.min ?? null;
+        row.valleyTempMaxC = lower?.max ?? null;
         row.phaseDiagnostic = diagnosePrecipitationPhase(json.hourly, indices, summitM);
         row.requestedElevationsM = { summit: summitM, mid: midM, lower: valleyM };
         row.returnedElevationsM = surfaceRows.map(x => Number.isFinite(x.elevation) ? x.elevation : null);
@@ -387,7 +396,11 @@ export function aggregate(results: any[]) {
         midFreeAirWindKph: round1(weighted("midFreeAirWindKph")),
         lowerFreeAirWindKph: round1(weighted("lowerFreeAirWindKph")),
         midTempC: round1(weighted("midTempC")),
+        midTempMinC: round1(weighted("midTempMinC")),
+        midTempMaxC: round1(weighted("midTempMaxC")),
         lowerTempC: round1(weighted("valleyTempC")),
+        lowerTempMinC: round1(weighted("valleyTempMinC")),
+        lowerTempMaxC: round1(weighted("valleyTempMaxC")),
         temperatureModels: basis.filter((v: any) => isNum(v.midTempC) && isNum(v.valleyTempC)).length,
         upperAirModels: basis.filter((v: any) => isNum(v.summitFreeAirWindKph)).length,
       },
