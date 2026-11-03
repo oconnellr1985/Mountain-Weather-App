@@ -45,3 +45,22 @@ export function buildForecastCautions(days: any[], maxWindKph = 30, maxDailyPrec
     return alerts;
   });
 }
+
+/**
+ * Flag potentially hazardous free-air flow near summit altitude in a short forecast
+ * horizon. This does not estimate terrain-specific gusts or calibrated risk.
+ * At least two independent forecast model sources must supply an upper-air value.
+ */
+export function selectHighElevationWindExposure(days: any[], routeWindThresholdKph = 35, horizonDays = 5) {
+  const level = Math.max(75, (Number.isFinite(routeWindThresholdKph) ? routeWindThresholdKph : 35) * 1.5);
+  const candidates = (days || []).slice(0, horizonDays)
+    .map((day: any) => ({
+      date: day.date,
+      dayIndex: day.dayIndex,
+      freeAirKph: day.altitudeGuidance?.summitFreeAirWindKph,
+      modelCount: day.altitudeGuidance?.upperAirModels ?? 0,
+      thresholdKph: level,
+    }))
+    .filter(x => finiteNumber(x.freeAirKph) && x.modelCount >= 2 && x.freeAirKph > level);
+  return candidates.sort((a, b) => b.freeAirKph - a.freeAirKph)[0] ?? null;
+}
