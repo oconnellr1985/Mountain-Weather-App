@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assessDailyCoverage, validateSnowfall, comparableWindGust, spreadRange, buildForecastCautions } from "../lib/forecast-validation";
+import { assessDailyCoverage, validateSnowfall, comparableWindGust, spreadRange, buildForecastCautions, selectHighElevationWindExposure } from "../lib/forecast-validation";
 import { aggregate } from "../lib/forecast-service";
 
 test("partial future-day RDPS guidance is excluded from complete-day consensus, but its significant warning survives", () => {
@@ -30,4 +30,25 @@ test("comparable ranges have null spreads when only one model remains", () => {
   assert.deepEqual(assessDailyCoverage(17,24),{complete:false,hours:17,expectedHours:24,reason:"Partial forecast day: 17/24 hourly values"});
   assert.equal(spreadRange([null,4]).spread,null);
   assert.equal(spreadRange([null,null]).count,0);
+});
+
+test("exposure warning uses multiple upper-air model sources and the same lookahead window as the operational summary", () => {
+  const days = Array.from({ length: 6 }, (_, i) => ({ date: `2026-11-${String(i + 3).padStart(2,"0")}`, dayIndex: i + 1,
+    altitudeGuidance: { summitFreeAirWindKph: [45, 68, 78, 124.8, 80, 240][i], upperAirModels: [3,4,4,4,1,4][i] } }));
+  const warning = selectHighElevationWindExposure(days, 30);
+  assert.equal(warning?.date, "2026-11-06");
+  assert.equal(warning?.freeAirKph, 124.8);
+  assert.equal(warning?.modelCount, 4);
+  assert.equal(selectHighElevationWindExposure(days.slice(0, 2), 30), null);
+  assert.equal(selectHighElevationWindExposure([{date:"2026-11-03", dayIndex:1, altitudeGuidance:{summitFreeAirWindKph:110,upperAirModels:1}}],30),null);
+  assert.equal(selectHighElevationWindExposure([],30),null);
+});
+test("production 840 cm outlier cannot distort weighted summit snow totals", () => {
+  const good = { modelId:"gfs", modelLabel:"GFS", weight:1, includeInConsensus:true, date:"2026-11-03", dayIndex:1, summitTempC:-10, summitWindKph:20, summitSnowCm:0.42, precipMm:0.6 };
+  const validated = validateSnowfall(840,0);
+  const anomalous = { modelId:"hrdps_west", modelLabel:"HRDPS West", weight:1.3, includeInConsensus:true, date:"2026-11-03", dayIndex:1, summitTempC:-9, summitWindKph:25, summitSnowCm:validated.value, rawSummitSnowCm:840, precipMm:0, dataQualityWarnings:[validated.warning] };
+  const day=aggregate([{model:{id:"gfs",maxLeadDays:16},daily:[good]},{model:{id:"hrdps_west",maxLeadDays:2},daily:[anomalous]}])[0];
+  assert.equal(day.summitSnowGfsCm,0.4);
+  assert.equal(day.summitSnowEcmwfCm,0.4);
+  assert.ok(day.modelStats.dataQualityWarnings.some(w=>w.includes("840.0 cm")));
 });
