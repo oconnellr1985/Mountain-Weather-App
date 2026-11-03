@@ -12,10 +12,12 @@ export async function GET(req: Request) {
     return value === null || value.trim() === "" ? NaN : Number(value);
   };
   const lat = read("lat"), lon = read("lon"), summitM = read("summitM");
+  const midM = read("midM"), valleyM = read("valleyM");
   if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 ||
       !Number.isFinite(summitM) || summitM < -500 || summitM > 9000) {
     return NextResponse.json({ error: "Missing or invalid lat/lon/summitM query parameters" }, { status: 400 });
   }
-  const data = await getWeatherData({ lat, lon, summitM, region: url.searchParams.get("region") || "global" });
+  const validAltitudeTargets = Number.isFinite(midM) && Number.isFinite(valleyM) && valleyM >= -500 && valleyM < midM && midM < summitM;
+  const data = await getWeatherData({ lat, lon, summitM, ...(validAltitudeTargets ? { midM, valleyM } : {}), region: url.searchParams.get("region") || "global" });
   return NextResponse.json(data, { status: data.error ? 502 : 200, headers: { "Cache-Control": "private, no-store" } });
 }

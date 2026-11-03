@@ -10,6 +10,8 @@ import AvalanchePanel from "@/components/AvalanchePanel";
 import { localDate } from "@/lib/weather-next-data";
 import { NORTH_TWIN_LOCATION } from "@/lib/objective-locations";
 import { usePlotWidth } from "@/components/use-plot-width";
+import { interpolateElevationTemperature } from "@/lib/elevation-temperature";
+import { buildForecastCautions, selectHighElevationWindExposure } from "@/lib/forecast-validation";
 
 const ObjectiveMap = dynamic(() => import("@/components/ObjectiveMap"), { ssr: false, loading: () => <p className="p-5">Loading map…</p> });
 
@@ -161,7 +163,10 @@ async function fetchHistoricalLookbackFromOpenMeteo(climb) {
 }
 
 async function fetchWeatherFromBackend(climb) {
-  const url = `/api/weather?climbId=${encodeURIComponent(climb.id)}&lat=${climb.lat}&lon=${climb.lon}&summitM=${climb.summitM}&region=${encodeURIComponent(getObjectiveRegion(climb))}`;
+  const profile = routeElevationProfile(climb);
+  const lowerM = profile.exitM < climb.summitM ? profile.exitM : Math.max(0, climb.summitM - 1200);
+  const midM = Math.round((climb.summitM + lowerM) / 2);
+  const url = `/api/weather?climbId=${encodeURIComponent(climb.id)}&lat=${climb.lat}&lon=${climb.lon}&summitM=${climb.summitM}&midM=${midM}&valleyM=${lowerM}&region=${encodeURIComponent(getObjectiveRegion(climb))}`;
   const result = await fetchJsonSafe(url);
   if (!result.ok) return { ok: false, forecast: [], history: [], historySource: "NO REAL HISTORY", source: "NO DATA", unavailableModels: [], error: `Weather backend failed: ${result.error}` };
   const data = result.data || {};
@@ -175,7 +180,7 @@ async function fetchWeatherFromBackend(climb) {
   const history = realHistory.ok ? realHistory.history : backendHistoryIsExplicitReal ? data.history : [];
   const historySource = realHistory.ok ? realHistory.source : backendHistoryIsExplicitReal ? backendHistorySource : `NO REAL HISTORY — ${realHistory.error || "backend did not provide an explicit real history source"}`;
 
-  return { ok: true, forecast: data.forecast, history, historySource, source: data.source || "Weather backend", unavailableModels: data.unavailableModels || [], weatherNext: data.weatherNext, timeZone: data.timeZone || data.weatherNext?.timeZone, error: "" };
+  return { ok: true, forecast: data.forecast, history, historySource, source: data.source || "Weather backend", target: data.target, unavailableModels: data.unavailableModels || [], weatherNext: data.weatherNext, timeZone: data.timeZone || data.weatherNext?.timeZone, error: "" };
 }
 
 async function fetchAvalancheFromBackend(climb) {
@@ -186,7 +191,7 @@ async function fetchAvalancheFromBackend(climb) {
   return { ...data, ok: true, avalancheHistory: Array.isArray(data.avalancheHistory) ? data.avalancheHistory : [], error: "" };
 }
 
-function meanDayValue(day, lowKey, highKey) { return ((day[lowKey] || 0) + (day[highKey] || 0)) / 2; }
+function meanDayValue(day, lowKey, highKey) { const a = day[lowKey], b = day[highKey]; if (typeof a === "number" && Number.isFinite(a) && typeof b === "number" && Number.isFinite(b)) return (a + b) / 2; if (typeof a === "number" && Number.isFinite(a)) return a; if (typeof b === "number" && Number.isFinite(b)) return b; return null; }
 function daySummitTemp(day) { return meanDayValue(day, "summitTempGfsC", "summitTempEcmwfC"); }
 function dayMidTemp(day) { return meanDayValue(day, "midTempGfsC", "midTempEcmwfC"); }
 function dayValleyTemp(day) { return meanDayValue(day, "valleyTempGfsC", "valleyTempEcmwfC"); }
@@ -285,6 +290,7 @@ function getTopDrivers(climb, forecast = [], history = [], avalanche = {}) {
   const t = climb.thresholds || {};
   const temp = daySummitTemp(day);
   const wind = dayWind(day);
+  const upperAirExposure = selectHighElevationWindExposure(forecast, t.maxSummitWindKph ?? 35);
   const precip = dayPrecip(day);
   const visibility = navigationVisibilityScore(day);
   const lowCloud = dayLowCloudPct(day);
@@ -295,8 +301,19 @@ function getTopDrivers(climb, forecast = [], history = [], avalanche = {}) {
   const constraints = [];
   if (precip <= (t.maxPrecipMm24h ?? 1)) positives.push({ label: "Low precipitation", detail: `${precip.toFixed(1)} mm in first forecast day`, severity: "positive" });
   else constraints.push({ label: "Precipitation", detail: `${precip.toFixed(1)} mm exceeds preferred limit`, severity: precip > 5 ? "major" : "moderate" });
-  if (wind <= (t.maxSummitWindKph ?? 35)) positives.push({ label: "Wind acceptable", detail: `${Math.round(wind)} kph grid wind/gust guidance`, severity: "positive" });
-  else constraints.push({ label: "Wind", detail: `${Math.round(wind)} kph exceeds route threshold`, severity: wind > 55 ? "major" : "moderate" });
+  if (typeof wind !== "number" || !Number.isFinite(wind)) {
+    constraints.push({ label: "Grid-cell wind unavailable", detail: "No comparable peak 10 m gust data for the first forecast day; do not infer calm conditions.", severity: "moderate" });
+  } else if (wind <= (t.maxSummitWindKph ?? 35) && upperAirExposure) {
+    constraints.push({
+      label: "Surface wind acceptable, but high-elevation exposure warning",
+      detail: `First-day grid-cell peak gust ${Math.round(wind)} km/h is within the ${t.maxSummitWindKph ?? 35} km/h threshold. On ${upperAirExposure.date} (day +${upperAirExposure.dayIndex}), ${upperAirExposure.modelCount} upper-air models indicate about ${Math.round(upperAirExposure.freeAirKph)} km/h at summit altitude. Free-air flow is not a terrain-specific gust forecast.`,
+      severity: "moderate",
+    });
+  } else if (wind <= (t.maxSummitWindKph ?? 35)) {
+    positives.push({ label: "Wind acceptable", detail: `${Math.round(wind)} km/h first-day grid-cell peak gust guidance`, severity: "positive" });
+  } else {
+    constraints.push({ label: "Wind", detail: `${Math.round(wind)} km/h exceeds first-day grid-cell gust threshold${upperAirExposure ? `; upper-air flow about ${Math.round(upperAirExposure.freeAirKph)} km/h on ${upperAirExposure.date}` : ""}`, severity: wind > 55 ? "major" : "moderate" });
+  }
   if (climb.routeType === "mixed_alpine_ice") {
     if (temp < (t.minSummitTempC ?? -18)) constraints.push({ label: "Extreme summit cold", detail: `${temp.toFixed(1)}°C is colder than preferred for this route`, severity: "moderate" });
     else if (typeof t.maxSummitTempC === "number" && temp > t.maxSummitTempC) constraints.push({ label: "Summit warming", detail: `${temp.toFixed(1)}°C may degrade snow/ice quality`, severity: "moderate" });
@@ -345,6 +362,34 @@ function visibilityForecastRows(forecast = []) {
     return { label: d.label, date: d.date, score, labelText: cloudNavigationLabel(score), low: dayLowCloudPct(d), mid: dayMidCloudPct(d), high: dayHighCloudPct(d), total: dayCloudPct(d), precip: dayPrecip(d), wind: dayWind(d) };
   });
 }
+
+function InterpretationReviewFlags({ modelCautions = [], bestWindowNeedsReview = false, upperAirExposure = null, mixedPhaseDays = [], dataQualityWarnings = [] }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? modelCautions : modelCautions.slice(0, 4);
+  const hasOperationalCautions = !!upperAirExposure || mixedPhaseDays.length > 0 || dataQualityWarnings.length > 0;
+  if (!modelCautions.length && !hasOperationalCautions) return null;
+  return <div className="mt-3 space-y-3 border-t pt-3 text-sm text-slate-800">
+    {modelCautions.length > 0 && <section data-model-disagreement>
+      <h4 className="font-semibold">Model disagreement / forecast uncertainty{bestWindowNeedsReview ? " — affects suggested best window" : ""}</h4>
+      <ul className="mt-2 list-inside list-disc space-y-1">
+        {visible.map((c, i) => <li key={`${c.kind}-${c.date}-${i}`}><strong>{c.label}</strong>. {c.detail}</li>)}
+      </ul>
+      {modelCautions.length > 4 && <button type="button" aria-expanded={showAll} onClick={() => setShowAll(v => !v)} className="mt-2 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
+        {showAll ? "Show top 4 flags" : `Show all ${modelCautions.length} flags`}
+      </button>}
+      <p className="mt-1 text-xs text-slate-500">All listed flags exceed the same category-specific review thresholds. The first four are displayed by category and date, not by a calibrated severity rank. Hidden flags are not less serious.</p>
+    </section>}
+    {hasOperationalCautions && <section data-operational-cautions>
+      <h4 className="font-semibold">Operational cautions</h4>
+      <ul className="mt-2 list-inside list-disc space-y-1">
+        {upperAirExposure && <li data-upper-air-caution><strong>High-elevation wind exposure ({upperAirExposure.date}):</strong> Approx. {Math.round(upperAirExposure.freeAirKph)} km/h at summit altitude from {upperAirExposure.modelCount} upper-air model sources. This flags possible exposure on ridges; it is not a surface gust forecast or a calibrated wind-risk ranking.</li>}
+        {mixedPhaseDays.length > 0 && <li data-phase-caution><strong>Potential mixed precipitation:</strong> Near-freezing precipitating hours on {mixedPhaseDays.slice(0,3).map(d => d.date).join(", ")}{mixedPhaseDays.length > 3 ? ` and ${mixedPhaseDays.length - 3} more days` : ""}. The forecast rain/snow split may be unreliable near the transition.</li>}
+        {dataQualityWarnings.map((message, i) => <li key={i} data-provider-quality><strong>Snowfall data filtered:</strong> {message}</li>)}
+      </ul>
+    </section>}
+  </div>;
+}
+
 function OperationalSummaryPanel({ climb, forecast = [], history = [], avalanche = {}, immediateScore = 0, confidence = 0 }) {
   const rating = ratingBand(immediateScore);
   const drivers = getTopDrivers(climb, forecast, history, avalanche);
@@ -383,7 +428,7 @@ function scoreWindowForDays(climb, forecastDays = []) {
       if (t.solarSensitivePowder) {
         const solar = solarReliability(d);
         const midTemp = dayMidTemp(d);
-        if (solar !== null && solar > 0.75 && midTemp > -4) p += 1.1 + Math.max(0, midTemp + 4) * 0.18;
+        if (solar !== null && midTemp !== null && solar > 0.75 && midTemp > -4) p += 1.1 + Math.max(0, midTemp + 4) * 0.18;
       }
       return s + p;
     }, 0);
@@ -405,8 +450,8 @@ function scoreWindowForDays(climb, forecastDays = []) {
       if (summitHigh < -1.5) p += 0.8;
       if (summitHigh > (t.excessiveSummitTempC ?? 7)) p += 1.0 + (summitHigh - (t.excessiveSummitTempC ?? 7)) * 0.25;
       if (summitTemp < (t.idealSummitTempMinC ?? -10)) p += Math.min(1.0, ((t.idealSummitTempMinC ?? -10) - summitTemp) * 0.10);
-      if (midTemp < (t.idealMidTempMinC ?? -4)) p += 0.4;
-      if (midTemp > (t.idealMidTempMaxC ?? 7)) p += 0.5;
+      if (midTemp !== null && midTemp < (t.idealMidTempMinC ?? -4)) p += 0.4;
+      if (midTemp !== null && midTemp > (t.idealMidTempMaxC ?? 7)) p += 0.5;
       const solar = solarReliability(d);
       if (solar !== null) {
         if (solar < 0.35) p += 1.6;
@@ -427,7 +472,7 @@ function scoreWindowForDays(climb, forecastDays = []) {
       if (summitTemp < (t.minSummitTempC ?? 0)) p += 2.5 + Math.abs(summitTemp - (t.minSummitTempC ?? 0)) * 0.7;
       if (summitTemp < (t.idealSummitTempC ?? 6)) p += Math.max(0, ((t.idealSummitTempC ?? 6) - summitTemp) * 0.18);
       if (freezingLevel < (t.minFreezingLevelM ?? climb.summitM + 100)) p += 1.5;
-      if (valleyTemp < (t.idealValleyTempC ?? 25)) p += Math.min(1.5, ((t.idealValleyTempC ?? 25) - valleyTemp) * 0.08);
+      if (valleyTemp !== null && valleyTemp < (t.idealValleyTempC ?? 25)) p += Math.min(1.5, ((t.idealValleyTempC ?? 25) - valleyTemp) * 0.08);
       const visibility = navigationVisibilityScore(d);
       if (visibility !== null) {
         if (visibility < 5) p += 2.0;
@@ -734,7 +779,9 @@ function MiniLineChart({ data = [], series = [], labelKey = "label", minOverride
   </svg></div><div className="mt-3 flex min-w-0 flex-wrap gap-x-4 gap-y-2 text-[13px] text-slate-700" data-model-legend>{series.map((s, i) => <div key={s.key} data-model-id={s.key} className="flex min-w-0 max-w-full items-start gap-2"><svg className="mt-1 shrink-0" width="36" height="12" viewBox="0 0 44 12" aria-hidden="true"><line x1="2" x2="42" y1="6" y2="6" stroke={lineColor(s, i)} strokeWidth={lineWidth(s)} strokeDasharray={lineDash(s, i)} strokeLinecap="round" /></svg><span className="min-w-0 break-words [overflow-wrap:anywhere]">{s.label}</span></div>)}</div>{hovered && <div className="pointer-events-none absolute left-2 right-2 top-4 max-w-[320px] break-words rounded-xl border border-slate-200 bg-white/95 p-3 text-xs shadow-lg"><div className="mb-1 font-semibold text-slate-900">{hovered[labelKey]} {hovered.date ? `· ${hovered.date}` : ""}</div>{series.map((s, i) => { const raw = hovered[s.key]; if (!valid(raw)) return <div key={s.key} className="text-slate-400"><span style={{ color: lineColor(s, i) }}>●</span> {s.label}: <strong>NO DATA</strong></div>; const value = Number.isInteger(raw) ? raw : raw.toFixed(1); return <div key={s.key} className="text-slate-700"><span style={{ color: lineColor(s, i) }}>●</span> {s.label}: <strong>{value}{s.unit ? ` ${s.unit}` : ""}</strong></div>; })}</div>}</div>;
 }
 
-function WindowTimeline({ forecast = [], bestWindow, source, climb }) { const dayCount = forecast.length; return <div className="rounded-2xl border bg-white p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-semibold">{dayCount}-day window watch</h3><p className="mt-1 text-sm font-medium text-slate-700">Temperature targets {climb.summitM.toLocaleString()} m (summit); wind and precipitation represent the surrounding model grid.</p><p className="mt-1 text-xs text-slate-600">Wind is the daily peak 10m gust where available, otherwise peak 10m wind, with no vertical summit interpolation. Precipitation is a grid-area total with no summit-specific correction.</p><p className="text-sm text-slate-500">Shows aggregate window signal. Missing/out-of-range model values are excluded, not treated as zeros.</p><p className="mt-2 text-sm text-fuchsia-900">WeatherNext affects precipitation here, plus cloud, pressure and solar where used by the route scoring, and precipitation disagreement in confidence. It does not affect summit temperature, wind, rain/snow split or freezing level. Only complete, fresh local days contribute, within its 15-day coverage.</p><p className="mt-1 text-xs text-slate-400">Source: {source}</p></div><Badge variant="secondary">Best: {bestWindow.label} ({bestWindow.windowLength} days)</Badge></div><div className="overflow-x-auto pb-2"><div className="grid gap-2" style={{ minWidth: `${Math.max(1120, dayCount * 108)}px`, gridTemplateColumns: `repeat(${dayCount || 1}, minmax(0, 1fr))` }}>{forecast.map((d, i) => { const wind = Math.round(((d.summitWindGfsKph || 0) + (d.summitWindEcmwfKph || 0)) / 2); const temp = (((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2).toFixed(1); const precip = (((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2).toFixed(1); const tempMin = typeof d.summitTempMinAvgC === "number" ? d.summitTempMinAvgC.toFixed(1) : "—"; const tempMax = typeof d.summitTempMaxAvgC === "number" ? d.summitTempMaxAvgC.toFixed(1) : "—"; const counts = d.modelStats?.fieldModelCounts || fieldSourceCounts(d); const wn = d.modelValues?.find(m => m.modelId === "weathernext_3"); const wnUsed = wn?.includeInConsensus && Number.isFinite(wn.precipMm); const inBest = i + 1 >= bestWindow.startDay && i + 1 <= bestWindow.endDay; return <div key={d.label} className={`rounded-xl border p-2 text-center text-xs ${inBest ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-slate-50"}`}><div className="font-semibold">{d.label}</div><div className="text-[10px] text-slate-400">{d.date || ""}</div><div className="mt-1 text-slate-600">Wind {wind} kph</div><div className="text-slate-600">Avg {temp}°C</div><div className="text-slate-600">Swing {tempMin} / {tempMax}°C</div><div className="text-slate-600">Precip {precip} mm</div><div className="mt-1 text-[10px] text-slate-500">Sources: wind {counts.wind} · temp {counts.temperature} · precip {counts.precipitation}</div>{wn && <div className="mt-1 text-[10px] text-fuchsia-900">WN3 {wnUsed ? "precip included" : wn.stale ? "stale · excluded" : "partial/missing · excluded"}</div>}</div>; })}</div></div></div>; }
+
+
+function WindowTimeline({ forecast = [], bestWindow, source, climb }) { const dayCount = forecast.length; return <div className="rounded-2xl border bg-white p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="font-semibold">{dayCount}-day window watch</h3><p className="mt-1 text-sm font-medium text-slate-700">Temperature targets {climb.summitM.toLocaleString()} m (summit); wind and precipitation represent the surrounding model grid.</p><p className="mt-1 text-xs text-slate-600">Wind uses comparable model grid-cell peak 10 m gusts only; ordinary mean wind is not substituted as a gust. Precipitation is a grid-area total with no summit-specific correction.</p><p className="text-sm text-slate-500">Shows aggregate window signal. Missing/out-of-range model values are excluded, not treated as zeros.</p><p className="mt-2 text-sm text-fuchsia-900">WeatherNext affects precipitation here, plus cloud, pressure and solar where used by the route scoring, and precipitation disagreement in confidence. It does not affect summit temperature, wind, rain/snow split or freezing level. Only complete, fresh local days contribute, within its 15-day coverage.</p><p className="mt-1 text-xs text-slate-400">Source: {source}</p></div><Badge variant="secondary">Best: {bestWindow.label} ({bestWindow.windowLength} days)</Badge></div><div className="overflow-x-auto pb-2"><div className="grid gap-2" style={{ minWidth: `${Math.max(1120, dayCount * 108)}px`, gridTemplateColumns: `repeat(${dayCount || 1}, minmax(0, 1fr))` }}>{forecast.map((d, i) => { const wind = Math.round(((d.summitWindGfsKph || 0) + (d.summitWindEcmwfKph || 0)) / 2); const temp = (((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2).toFixed(1); const precip = (((d.precipGfsMm || 0) + (d.precipEcmwfMm || 0)) / 2).toFixed(1); const tempMin = typeof d.summitTempMinAvgC === "number" ? d.summitTempMinAvgC.toFixed(1) : "—"; const tempMax = typeof d.summitTempMaxAvgC === "number" ? d.summitTempMaxAvgC.toFixed(1) : "—"; const counts = d.modelStats?.fieldModelCounts || fieldSourceCounts(d); const wn = d.modelValues?.find(m => m.modelId === "weathernext_3"); const wnUsed = wn?.includeInConsensus && Number.isFinite(wn.precipMm); const inBest = i + 1 >= bestWindow.startDay && i + 1 <= bestWindow.endDay; return <div key={d.label} className={`rounded-xl border p-2 text-center text-xs ${inBest ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-slate-50"}`}><div className="font-semibold">{d.label}</div><div className="text-[10px] text-slate-400">{d.date || ""}</div><div className="mt-1 text-slate-600">Wind {wind} kph</div><div className="text-slate-600">Avg {temp}°C</div><div className="text-slate-600">Swing {tempMin} / {tempMax}°C</div><div className="text-slate-600">Precip {precip} mm</div><div className="mt-1 text-[10px] text-slate-500">Sources: wind {counts.wind} · temp {counts.temperature} · precip {counts.precipitation}</div>{wn && <div className="mt-1 text-[10px] text-fuchsia-900">WN3 {wnUsed ? "precip included" : wn.stale ? "stale · excluded" : "partial/missing · excluded"}</div>}</div>; })}</div></div></div>; }
 
 function getAvailableModelLabels(forecast = []) { const labels = []; forecast.forEach((day) => (day.modelValues || []).forEach((model) => { if (!labels.find((item) => item.id === model.modelId)) labels.push({ id: model.modelId, label: model.modelLabel }); })); return labels; }
 function RawModelLineChart({ forecast = [], metricKey, title, unit, note }) {
@@ -742,7 +789,8 @@ function RawModelLineChart({ forecast = [], metricKey, title, unit, note }) {
   const data = forecast.map(day => {
     const row = { label: day.label, date: day.date };
     modelLabels.forEach(model => {
-      const value = day.modelValues?.find(item => item.modelId === model.id)?.[metricKey];
+      const modelValue = day.modelValues?.find(item => item.modelId === model.id);
+      const value = modelValue?.dailyCoverage?.complete === false ? null : modelValue?.[metricKey];
       row[model.id] = Number.isFinite(value) ? Number(value.toFixed(1)) : null;
     });
     return row;
@@ -751,7 +799,7 @@ function RawModelLineChart({ forecast = [], metricKey, title, unit, note }) {
   return <Card><CardContent className="p-5"><div data-raw-model-metric={metricKey}><h3 className="mb-2 font-semibold">{title}</h3>{note && <p className="mb-3 text-sm text-slate-500">{note}</p>}<MiniLineChart data={data} series={series} /></div></CardContent></Card>;
 }
 
-function ModelAvailabilityPanel({ forecast = [], climb, unavailableModels = [], weatherNext = {} }) { const applicableModels = FORECAST_MODEL_CATALOG.filter((model) => modelAppliesToClimb(model, climb)); return <Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Model availability and agreement</h3><p className="mb-2 text-sm text-slate-700"><strong>Forecast target elevation: {climb.summitM.toLocaleString()} m (summit).</strong> Other model temperatures are requested from Open-Meteo at this elevation using its statistical downscaling. Wind uses the daily peak gust where available, otherwise peak 10m wind; the app does not vertically interpolate wind to the summit.</p><WeatherNextElevationNote climb={climb} status={weatherNext} compact /><p className="mb-2 text-sm text-slate-600">The magenta WeatherNext row is native grid-surface guidance, with no summit adjustment. Its wind is the peak of hourly ensemble-mean speeds, not a gust. Do not average its temperature or wind with the other rows, which use different temperature elevation handling and wind statistics. Compare common precipitation and cloud fields in the corresponding raw traces.</p><p className="mb-4 text-sm text-slate-500">Short-range models should only appear inside their valid lead time. If a model is outside its horizon, it is blank—not zero.</p><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Model</th><th className="p-2">Provider</th>{forecast.map((day) => <th key={day.label} className="p-2 text-center">{day.label}</th>)}</tr></thead><tbody>{applicableModels.map((model) => <tr key={model.id} className={`border-t ${model.id === "weathernext_3" ? "bg-fuchsia-50/60" : ""}`}><td className="p-2 font-medium">{model.label}</td><td className="p-2 text-slate-500">{model.provider}</td>{forecast.map((day) => { const value = day.modelValues?.find((m) => m.modelId === model.id); const withinLead = day.dayIndex <= model.maxLeadDays; return <td key={`${model.id}-${day.label}`} className="p-2 text-center">{value ? <div className={`rounded-lg px-1 py-1 text-[10px] ${model.id === "weathernext_3" ? "bg-fuchsia-100 text-fuchsia-950" : "bg-emerald-50 text-emerald-900"}`}>{Number.isFinite(value.summitWindKph) ? Math.round(value.summitWindKph) : Number.isFinite(value.surfaceWindKph) ? Math.round(value.surfaceWindKph) : "—"}kph<br />{(value.summitTempC ?? value.surfaceTempC)?.toFixed?.(1) ?? "—"}°C<br />{value.precipMm?.toFixed?.(1) ?? "—"}mm{value.modelId === "weathernext_3" && <><br /><span>grid surface · {value.hoursAvailable}/{value.expectedHours}h{value.stale ? " · stale" : ""}</span></>}</div> : withinLead ? <span className="text-red-600">unavail</span> : <span className="text-slate-300">—</span>}</td>; })}</tr>)}</tbody></table></div>{unavailableModels.length > 0 && <div className="mt-3 rounded-xl bg-amber-50 p-3 text-xs text-amber-900">Unavailable/planned: {unavailableModels.join("; ")}</div>}</CardContent></Card>; }
+function ModelAvailabilityPanel({ forecast = [], climb, unavailableModels = [], weatherNext = {} }) { const applicableModels = FORECAST_MODEL_CATALOG.filter((model) => modelAppliesToClimb(model, climb)); return <Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Model availability and agreement</h3><p className="mb-2 text-sm text-slate-700"><strong>Forecast target elevation: {climb.summitM.toLocaleString()} m (summit).</strong> Other model temperatures are requested from Open-Meteo at this elevation using its statistical downscaling. Wind comparisons use grid-cell peak 10 m gusts only; mean wind and free-air wind are not combined with gusts.</p><WeatherNextElevationNote climb={climb} status={weatherNext} compact /><p className="mb-2 text-sm text-slate-600">The magenta WeatherNext row is native grid-surface guidance, with no summit adjustment. Its wind is the peak of hourly ensemble-mean speeds, not a gust. Do not average its temperature or wind with the other rows, which use different temperature elevation handling and wind statistics. Compare common precipitation and cloud fields in the corresponding raw traces.</p><p className="mb-4 text-sm text-slate-500">Partial forecast days are labelled and excluded from the calendar-day consensus; large precipitation amounts over partial days are flagged in the interpretation. Missing and out-of-domain fields are not zeros.</p><div className="overflow-x-auto rounded-xl border"><table className="w-full min-w-[1100px] text-xs"><thead className="bg-slate-100 text-left text-slate-600"><tr><th className="p-2">Model</th><th className="p-2">Provider</th>{forecast.map((day) => <th key={day.label} className="p-2 text-center">{day.label}</th>)}</tr></thead><tbody>{applicableModels.map((model) => <tr key={model.id} className={`border-t ${model.id === "weathernext_3" ? "bg-fuchsia-50/60" : ""}`}><td className="p-2 font-medium">{model.label}</td><td className="p-2 text-slate-500">{model.provider}</td>{forecast.map((day) => { const value = day.modelValues?.find((m) => m.modelId === model.id); const withinLead = day.dayIndex <= model.maxLeadDays; return <td key={`${model.id}-${day.label}`} className="p-2 text-center">{value ? <div className={`rounded-lg px-1 py-1 text-[10px] ${value.dailyCoverage?.complete === false ? "bg-amber-50 text-amber-900" : model.id === "weathernext_3" ? "bg-fuchsia-100 text-fuchsia-950" : "bg-emerald-50 text-emerald-900"}`}>{Number.isFinite(value.summitWindKph) ? Math.round(value.summitWindKph) : Number.isFinite(value.surfaceWindKph) ? Math.round(value.surfaceWindKph) : "—"}kph<br />{(value.summitTempC ?? value.surfaceTempC)?.toFixed?.(1) ?? "—"}°C<br />{value.precipMm?.toFixed?.(1) ?? "—"}mm{value.dailyCoverage?.complete === false && <><br /><strong>PARTIAL {value.dailyCoverage.hours}/{value.dailyCoverage.expectedHours} h · excluded</strong></>}{value.modelId === "weathernext_3" && <><br /><span>grid surface · {value.hoursAvailable}/{value.expectedHours}h{value.stale ? " · stale" : ""}</span></>}</div> : withinLead ? <span className="text-red-600">unavail</span> : <span className="text-slate-300">—</span>}</td>; })}</tr>)}</tbody></table></div>{unavailableModels.length > 0 && <div className="mt-3 rounded-xl bg-amber-50 p-3 text-xs text-amber-900">Unavailable/planned: {unavailableModels.join("; ")}</div>}</CardContent></Card>; }
 
 function LookbackPanel({ climb, history = [], historySource = "NO REAL HISTORY" }) {
   const surface = buildSurfaceState(climb, history);
@@ -777,19 +825,20 @@ function routeElevationProfile(climb) {
   return profiles[climb.id] || { entranceM: climb.summitM, exitM: Math.max(1000, climb.summitM - 1200), descentLabel: "High point → exit", aspect: "solar", slopeDeg: 32, climbHours: 5, skiHours: 2 };
 }
 
-function estimateTempAtElevation(day, elevationM, climb) {
-  const summitAvg = daySummitTemp(day);
-  const deltaM = climb.summitM - elevationM;
-  return summitAvg + (deltaM / 1000) * 6.5;
+function modelTemperatureAtElevation(day, elevationM, climb, metric = "mean") {
+  const altitude = day.altitudeGuidance || {};
+  const summit = metric === "min" ? day.summitTempMinAvgC : metric === "max" ? day.summitTempMaxAvgC : daySummitTemp(day);
+  const mid = metric === "min" ? altitude.midTempMinC : metric === "max" ? altitude.midTempMaxC : altitude.midTempC;
+  const lower = metric === "min" ? altitude.lowerTempMinC : metric === "max" ? altitude.lowerTempMaxC : altitude.lowerTempC;
+  return interpolateElevationTemperature([
+    { elevationM: climb.summitM, temperatureC: summit },
+    { elevationM: altitude.midM, temperatureC: mid },
+    { elevationM: altitude.lowerM, temperatureC: lower },
+  ], elevationM);
 }
-function estimateLowAtElevation(day, elevationM, climb) {
-  const summitLow = typeof day.summitTempMinAvgC === "number" ? day.summitTempMinAvgC : daySummitTemp(day) - 3;
-  return summitLow + ((climb.summitM - elevationM) / 1000) * 6.5;
-}
-function estimateHighAtElevation(day, elevationM, climb) {
-  const summitHigh = typeof day.summitTempMaxAvgC === "number" ? day.summitTempMaxAvgC : daySummitTemp(day) + 3;
-  return summitHigh + ((climb.summitM - elevationM) / 1000) * 6.5;
-}
+function estimateTempAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb); }
+function estimateLowAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb, "min"); }
+function estimateHighAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb, "max"); }
 function degToRad(v) { return v * Math.PI / 180; }
 function radToDeg(v) { return v * 180 / Math.PI; }
 function saturationVaporPressureHpa(tC) { return 6.112 * Math.exp((17.67 * tC) / (tC + 243.5)); }
@@ -875,6 +924,8 @@ function makeCornHourly(day, climb, elevationM, kind) {
   const high = estimateHighAtElevation(day, elevationM, climb);
   const precip = dayPrecip(day);
   const wind = dayWind(day);
+  // Never run the snow-surface calculation with a fabricated 0°C or a fixed lapse rate.
+  if (![low, high, precip, wind].every(v => typeof v === "number" && Number.isFinite(v))) return [];
   const rh = day.rhPct ?? day.relativeHumidityPct ?? 70;
   const cloud = cornCloudFraction(day);
   const rho = cornDensityForClimb(climb);
@@ -912,6 +963,7 @@ function analyzeCornDay(climb, day) {
   const profile = routeElevationProfile(climb);
   const entrance = makeCornHourly(day, climb, profile.entranceM, "entrance");
   const exit = makeCornHourly(day, climb, profile.exitM, "exit");
+  if (!entrance.length || !exit.length) return null;
   const primeEntrance = entrance.filter((h) => h.state === "Prime corn");
   const primeExit = exit.filter((h) => h.state === "Prime corn");
   const entranceStart = primeEntrance[0]?.hour || null;
@@ -934,7 +986,8 @@ function analyzeCornDay(climb, day) {
 }
 function analyzeCornCycle(climb, forecast = []) {
   if (climb.routeType !== "ski_corn" || !forecast.length) return null;
-  const days = forecast.slice(0, 7).map((day) => analyzeCornDay(climb, day));
+  const days = forecast.slice(0, 7).map((day) => analyzeCornDay(climb, day)).filter(Boolean);
+  if (!days.length) return null;
   const best = [...days].sort((a, b) => b.cornScore - a.cornScore)[0];
   return { ...best, days };
 }
@@ -978,7 +1031,7 @@ function CornCycleGraph({ title, elevationM, rows = [] }) {
 }
 function CornCyclePanel({ climb, forecast }) {
   const analysis = analyzeCornCycle(climb, forecast);
-  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Corn-cycle analysis is only shown for ski-corn objectives with live forecast data.</div>;
+  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Corn-cycle analysis requires model-native temperature guidance at the route elevations; it is unavailable where those forecast fields are missing.</div>;
   const bestDayLabel = `${analysis.day.label}${analysis.day.date ? ` · ${analysis.day.date}` : ""}`;
   return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-5"><MetricCard icon={SunIcon} label="Best 7-day Corn Score" value={`${analysis.cornScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.cornScore)} /><MetricCard icon={SnowIcon} label="Best Refreeze Score" value={`${analysis.refreezeScore.toFixed(1)} / 10`} detail="Overnight supportability" className={scoreColor(analysis.refreezeScore)} /><MetricCard icon={SunIcon} label="Solar Reliability" value={solarReliability(analysis.day) === null ? "NO DATA" : `${Math.round(solarReliability(analysis.day) * 100)}%`} detail={`Low cloud ${cloudText(dayLowCloudPct(analysis.day))} · total ${cloudText(dayCloudPct(analysis.day))}`} className={scoreColor((solarReliability(analysis.day) ?? 0) * 10)} /><MetricCard icon={MountainIcon} label="Best Ski Entrance" value={analysis.targetSki ? `${analysis.targetSki}:00` : "No clear time"} detail={`${analysis.profile.entranceM} m · ${analysis.profile.aspect}`} /><MetricCard icon={TrendIcon} label="Best Exit Target" value={analysis.exitTarget ? `${analysis.exitTarget}:00` : "No clear time"} detail={`${analysis.profile.exitM} m lower route`} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day corn-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">Best-day strategy is based on {bestDayLabel}. The graphs and heatmaps compare the entrance/high point and the lower exit elevation across the next 7 forecast days. Green means the Ullr-style surface-state model estimates a prime corn window; blue is delayed/icy; orange is too soft/wet. Hover over the curve for time, effective temp, melt/refreeze values, and surface-state interpretation.</p></CardContent></Card><div className="grid gap-4"><CornCycleCurveGraph title="Entrance / high-point 7-day corn curve" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleCurveGraph title="Exit / lower-route 7-day corn curve" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /><CornCycleHeatmap title="Entrance / high-point corn heatmap" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleHeatmap title="Exit / lower-route corn heatmap" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /></div><Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Best-day route timing strategy — {bestDayLabel}</h3><div className="grid gap-3 md:grid-cols-4 text-sm"><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Start climbing</div><div className="text-xl font-semibold">{analysis.startClimb ? `${analysis.startClimb}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Reach entrance</div><div className="text-xl font-semibold">{analysis.targetSki ? `${Math.max(analysis.targetSki - 1, 6)}:00` : "—"}</div></div><div className="rounded-xl bg-emerald-50 p-3"><div className="text-emerald-700">Start skiing</div><div className="text-xl font-semibold text-emerald-900">{analysis.targetSki ? `${analysis.targetSki}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Clear lower route</div><div className="text-xl font-semibold">{analysis.exitTarget ? `${analysis.exitTarget}:00` : "—"}</div></div></div></CardContent></Card></div>;
 }
@@ -1013,6 +1066,7 @@ function analyzePowderDay(climb, day, avalanche, priorSnowCm = 0) {
   const hasFreshPowderSource = recentSnowCm >= (climb.thresholds.minNewSnow24hCm ?? 8);
   const hasMarginalRefresh = recentSnowCm >= 3;
   const hourly = makePowderHourly(day, climb, elevationM, hasFreshPowderSource || hasMarginalRefresh);
+  if (!hourly.length) return null;
   const wind = dayWind(day);
   const summitTemp = daySummitTemp(day);
   const freezingLevel = day.freezingLevelM || 0;
@@ -1055,8 +1109,10 @@ function analyzePowderCycle(climb, forecast = [], avalanche) {
     const priorSnowCm = seven.slice(Math.max(0, index - 3), index).reduce((s, d) => s + (((d.summitSnowGfsCm || 0) + (d.summitSnowEcmwfCm || 0)) / 2), 0);
     return analyzePowderDay(climb, day, avalanche, priorSnowCm);
   });
-  const best = [...days].sort((a, b) => b.powderScore - a.powderScore)[0];
-  return { ...best, days };
+  const usableDays = days.filter(Boolean);
+  if (!usableDays.length) return null;
+  const best = [...usableDays].sort((a, b) => b.powderScore - a.powderScore)[0];
+  return { ...best, days: usableDays };
 }
 function PowderCycleGraph({ title, elevationM, days = [] }) {
   const [hover, setHover] = useState(null);
@@ -1088,7 +1144,7 @@ function PowderCycleHeatmap({ title, elevationM, days = [] }) {
 }
 function PowderCyclePanel({ climb, forecast, avalanche }) {
   const analysis = analyzePowderCycle(climb, forecast, avalanche);
-  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Powder-cycle analysis is only shown for powder/steep-ski objectives with live forecast data.</div>;
+  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Powder-cycle analysis requires model-native temperature guidance at route elevations; it is unavailable where those forecast fields are missing.</div>;
   const bestDayLabel = `${analysis.day.label}${analysis.day.date ? ` · ${analysis.day.date}` : ""}`;
   return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-4"><MetricCard icon={SnowIcon} label="Best Powder Score" value={`${analysis.powderScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.powderScore)} /><MetricCard icon={SnowIcon} label="Powder Source" value={analysis.availability} detail={`24h: ${analysis.snow24.toFixed(1)} cm · recent: ${analysis.recentSnowCm.toFixed(1)} cm`} className={analysis.hasFreshPowderSource ? "text-emerald-700" : analysis.hasMarginalRefresh ? "text-yellow-700" : "text-red-700"} /><MetricCard icon={WindIcon} label="Wind Loading" value={`${Math.round(analysis.wind)} kph`} detail="Strong wind after snow is a major penalty" className={analysis.wind > 30 ? "text-red-700" : "text-emerald-700"} /><MetricCard icon={MountainIcon} label="Freezing Level" value={`${Math.round(analysis.freezingLevel)} m`} detail="Should stay below the route" className={analysis.freezingLevel > (climb.thresholds.maxFreezingLevelM || 2200) ? "text-red-700" : "text-emerald-700"} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day powder-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">This uses Ullr-style effective snow temperature and daily heat integrals for powder preservation, but separates preservation from availability. Cold conditions do not create powder unless there is recent or forecast snow. Conservative gates: no more than 20 cm in 24h, avalanche hazard Moderate or lower, freezing level below the route, and limited wind loading after snowfall.</p></CardContent></Card><div className="grid gap-4"><PowderCycleGraph title="Powder preservation curve" elevationM={analysis.profile.entranceM || climb.summitM} days={analysis.days} /><PowderCycleHeatmap title="Powder state heatmap" elevationM={analysis.profile.entranceM || climb.summitM} days={analysis.days} /></div></div>;
 }
@@ -1143,6 +1199,13 @@ export default function MountainWindowApp() {
   const windowQuality = useMemo(() => hasLiveData ? scorePatternStability(climb, forecast) : 0, [climb, forecast, hasLiveData]);
   const bestWindow = useMemo(() => hasLiveData ? findBestUpcomingWindow(climb, history, forecast) : { label: "NO DATA", windowLength: 0, leadDays: 0, quality: 0, confidence: 0 }, [climb, history, forecast, hasLiveData]);
   const pattern = useMemo(() => hasLiveData ? classifyPattern(history, forecast) : "NO DATA", [history, forecast, hasLiveData]);
+  const modelCautions = hasLiveData ? buildForecastCautions(forecast, climb.thresholds?.maxSummitWindKph ?? 30, climb.thresholds?.maxPrecipMm24h ?? 1) : [];
+  const warningPriority = { precipitation: 0, "partial-precipitation": 1, wind: 2 };
+  const orderedModelCautions = [...modelCautions].sort((a, b) => (warningPriority[a.kind] ?? 3) - (warningPriority[b.kind] ?? 3) || a.dayIndex - b.dayIndex);
+  const bestWindowNeedsReview = modelCautions.some(c => c.dayIndex >= (bestWindow.startDay || bestWindow.leadDays) && c.dayIndex <= (bestWindow.endDay || (bestWindow.leadDays + 2)));
+  const upperAirExposure = hasLiveData ? selectHighElevationWindExposure(forecast, climb.thresholds?.maxSummitWindKph ?? 35) : null;
+  const mixedPhaseDays = forecast.slice(0, 5).filter(d => d.phaseGuidance?.modelsFlaggingUncertainPhase > 0);
+  const dataQualityWarnings = [...new Set(forecast.slice(0, 5).flatMap(d => d.modelStats?.dataQualityWarnings || []))];
   const recommendation = useMemo(() => {
     if (!hasLiveData) return "NO DATA — live weather could not be retrieved. Do not use this tool for decision making.";
     const todayVisibility = navigationVisibilityScore(forecast[0] || {});
@@ -1160,20 +1223,42 @@ export default function MountainWindowApp() {
     return "No strong immediate window identified. Keep monitoring for model agreement and pressure trend changes.";
   }, [hasLiveData, climb.id, climb.routeType, bestWindow, windowQuality, immediateGoQuality, mode, avalanche.riskScore]);
 
-  const combinedChart = forecast.map((d) => ({ label: d.label, date: d.date, summitWindAvg: Math.round(((d.summitWindGfsKph || 0) + (d.summitWindEcmwfKph || 0)) / 2), midWindAvg: Math.round(((d.midWindGfsKph || 0) + (d.midWindEcmwfKph || 0)) / 2), valleyWindAvg: Math.round(((d.valleyWindGfsKph || 0) + (d.valleyWindEcmwfKph || 0)) / 2), summitTempAvg: Number((((d.summitTempGfsC || 0) + (d.summitTempEcmwfC || 0)) / 2).toFixed(1)), summitTempMinAvg: d.summitTempMinAvgC ?? null, summitTempMaxAvg: d.summitTempMaxAvgC ?? null, summitRainAvg: Number((((d.summitRainGfsMm || 0) + (d.summitRainEcmwfMm || 0)) / 2).toFixed(1)), summitSnowAvg: Number((((d.summitSnowGfsCm || 0) + (d.summitSnowEcmwfCm || 0)) / 2).toFixed(1)), freezingLevelM: d.freezingLevelM ?? null, pressureHpa: d.pressureHpa ?? null, cloudCoverPct: dayCloudPct(d), cloudCoverLowPct: dayLowCloudPct(d), cloudCoverMidPct: dayMidCloudPct(d), cloudCoverHighPct: dayHighCloudPct(d), solarReliabilityPct: solarReliability(d) === null ? null : Math.round(solarReliability(d) * 100), navigationVisibility: navigationVisibilityScore(d) === null ? null : Number(navigationVisibilityScore(d).toFixed(1)), navigationVisibilityPct: navigationVisibilityScore(d) === null ? null : Math.round(navigationVisibilityScore(d) * 10) }));
+  const combinedChart = forecast.map((d) => ({
+    label: d.label, date: d.date,
+    summitWindAvg: meanDayValue(d, "summitWindGfsKph", "summitWindEcmwfKph"),
+    summitFreeAirWind: d.altitudeGuidance?.summitFreeAirWindKph ?? null,
+    midFreeAirWind: d.altitudeGuidance?.midFreeAirWindKph ?? null,
+    lowerFreeAirWind: d.altitudeGuidance?.lowerFreeAirWindKph ?? null,
+    summitTempAvg: meanDayValue(d, "summitTempGfsC", "summitTempEcmwfC"),
+    midTempAvg: d.altitudeGuidance?.midTempC ?? null,
+    lowerTempAvg: d.altitudeGuidance?.lowerTempC ?? null,
+    summitTempMinAvg: d.summitTempMinAvgC ?? null,
+    summitTempMaxAvg: d.summitTempMaxAvgC ?? null,
+    summitRainAvg: meanDayValue(d, "summitRainGfsMm", "summitRainEcmwfMm"),
+    summitSnowAvg: meanDayValue(d, "summitSnowGfsCm", "summitSnowEcmwfCm"),
+    freezingLevelM: d.freezingLevelM ?? null, pressureHpa: d.pressureHpa ?? null,
+    cloudCoverPct: dayCloudPct(d), cloudCoverLowPct: dayLowCloudPct(d),
+    cloudCoverMidPct: dayMidCloudPct(d), cloudCoverHighPct: dayHighCloudPct(d),
+    solarReliabilityPct: solarReliability(d) === null ? null : Math.round(solarReliability(d) * 100),
+    navigationVisibilityPct: navigationVisibilityScore(d) === null ? null : Math.round(navigationVisibilityScore(d) * 10),
+  }));
+  const windSeries = [{ key: "summitWindAvg", label: "Grid-cell peak 10 m gust", unit: "km/h", color: "#111827" }];
+
 
   return <div className="min-h-screen bg-slate-50 p-4 md:p-8"><div className="mx-auto max-w-7xl space-y-6">
     <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between"><div><div className="flex items-center gap-2 text-sm font-medium text-slate-600"><MountainIcon /> Mountain Window Intelligence</div><h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">Weather + Avalanche Window Prototype</h1><p className="mt-2 max-w-3xl text-slate-600">Decision-support dashboard for alpine climbing and ski mountaineering windows. Weather data now comes through backend routes using direct national-model feeds via Open-Meteo, requested at the objective summit elevation where supported. If live weather data fails, scoring is disabled and NO DATA is shown.</p></div><div className="flex flex-col gap-2 sm:flex-row"><SelectBox className="w-[280px]" value={climbId} onChange={(v) => { if (v === "map") setTab("map"); else setClimbId(v); }} options={[{ value: "map", label: "Select from map…" }, ...climbs.map((c) => ({ value: c.id, label: c.name }))]} /><SelectBox className="w-[180px]" value={mode} onChange={setMode} options={[{ value: "summer", label: "Summer alpine" }, { value: "winter", label: "Winter / ski" }]} /></div></div>
     <Card><CardContent className="p-5"><div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><div><h2 className="text-xl font-semibold text-slate-950">{climb.name}</h2><p className="text-sm text-slate-600">{climb.region} · {climb.summitM} m · {climb.lat.toFixed(3)}, {climb.lon.toFixed(3)} · {climb.style} · {routeTypeLabel(climb)}</p></div><div className="flex flex-wrap gap-2"><Badge variant="secondary">Pattern: {pattern}</Badge><Badge variant="secondary">Best watch: {bestWindow.label}</Badge><Badge variant="outline">Mode: {mode}</Badge><Badge>Manual review required</Badge><button onClick={() => setRefreshCount((n) => n + 1)} className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">{weatherState.loading ? "Loading…" : "Refresh live forecast"}</button></div></div></CardContent></Card>
     <div className="grid gap-4 md:grid-cols-6"><MetricCard icon={MountainIcon} label="Objective Type" value={routeTypeLabel(climb)} detail={routeTypeDescription(climb)} /><MetricCard icon={SunIcon} label="Immediate Go Window" value={hasLiveData ? `${immediateGoQuality.toFixed(1)} / 10` : "NO DATA"} detail={climb.routeType === "ski_corn" ? "Next 24–48 hrs" : "Next 24 hrs"} className={scoreColor(immediateGoQuality)} /><MetricCard icon={GaugeIcon} label="72h Pattern Stability" value={hasLiveData ? `${windowQuality.toFixed(1)} / 10` : "NO DATA"} detail="Next 3-day block" className={scoreColor(windowQuality)} /><MetricCard icon={TrendIcon} label="Best Upcoming Window" value={hasLiveData ? `${bestWindow.quality.toFixed(1)} / 10` : "NO DATA"} detail={hasLiveData ? `${bestWindow.label} · ${watchStatusForWindow(bestWindow)}` : "NO DATA"} className={scoreColor(bestWindow.quality)} /><MetricCard icon={GaugeIcon} label="Forecast Confidence" value={hasLiveData ? `${bestWindow.confidence.toFixed(1)} / 10` : "NO DATA"} detail="Lead-time penalty + model spread" className={scoreColor(bestWindow.confidence)} /><MetricCard icon={SunIcon} label={climb.routeType === "ski_corn" ? "Solar Reliability" : "Navigation Visibility"} value={hasLiveData ? (climb.routeType === "ski_corn" ? (solarReliability(forecast[0] || {}) === null ? "NO DATA" : `${Math.round(solarReliability(forecast[0] || {}) * 100)}%`) : cloudNavigationLabel(navigationVisibilityScore(forecast[0] || {}))) : "NO DATA"} detail={hasLiveData ? `Cloud: total ${cloudText(dayCloudPct(forecast[0] || {}))} · low ${cloudText(dayLowCloudPct(forecast[0] || {}))}` : "Cloud cover not loaded"} className={hasLiveData ? scoreColor(climb.routeType === "ski_corn" ? ((solarReliability(forecast[0] || {}) ?? 0) * 10) : (navigationVisibilityScore(forecast[0] || {}) ?? 0)) : ""} /><MetricCard icon={ShieldIcon} label="Avalanche Risk Context" value={hasAvalancheData ? `${avalanche.riskScore.toFixed(1)} / 10` : avalancheState.data?.status === "unrated" ? "NO RATING" : "NO LIVE DATA"} detail={mode === "winter" ? avalanche.headline : "Hidden in summer mode"} className={hasAvalancheData ? scoreColor(avalanche.riskScore, true) : "text-slate-600"} /><MetricCard icon={TrendIcon} label="Pattern State" value={hasLiveData ? pattern : "NO DATA"} detail="Lookback + forecast" /></div>
-    <Card><CardContent className="p-5"><div className="flex gap-3"><AlertIcon className="mt-1 h-5 w-5 text-amber-600" /><div><h3 className="font-semibold text-slate-950">Interpretation</h3><p className="mt-1 text-slate-700">{recommendation}</p><p className="mt-2 text-sm text-slate-500">The app alerts on “possible window forming,” not “safe to go.” Final decisions require human review of route conditions, observations, avalanche problems, glacier hazards, and team capability.</p></div></div></CardContent></Card>
+    <Card><CardContent className="p-5"><div className="flex gap-3"><AlertIcon className="mt-1 h-5 w-5 text-amber-600" /><div><h3 className="font-semibold text-slate-950">Interpretation</h3><p className="mt-1 text-slate-700">{recommendation}</p>
+    {hasLiveData && <InterpretationReviewFlags modelCautions={orderedModelCautions} bestWindowNeedsReview={bestWindowNeedsReview} upperAirExposure={upperAirExposure} mixedPhaseDays={mixedPhaseDays} dataQualityWarnings={dataQualityWarnings} />}
+    <p className="mt-2 text-sm text-slate-500">The app alerts on “possible window forming,” not “safe to go.” Final decisions require human review of route conditions, observations, avalanche problems, glacier hazards, and team capability.</p></div></div></CardContent></Card>
     {hasLiveData && <OperationalSummaryPanel climb={climb} forecast={forecast} history={history} avalanche={avalanche} immediateScore={immediateGoQuality} confidence={bestWindow.confidence} />}
     {hasLiveData && <WeatherNextPanel forecast={forecast} status={weatherState.data?.weatherNext} climb={climb} />}
     {!hasLiveData && <div className="rounded-2xl border border-red-500 bg-red-50 p-6 text-sm text-red-900"><strong>DATA ERROR — DO NOT USE THIS TOOL</strong><div className="mt-2">{weatherState.error || "Live weather data could not be retrieved."}</div><div className="mt-2">All scoring, windows, and recommendations are disabled.</div></div>}
-    {hasLiveData && <><WindowTimeline forecast={forecast} bestWindow={bestWindow} source={source} climb={climb} /><div className="grid gap-4 lg:grid-cols-2"><RawModelLineChart forecast={forecast} metricKey="summitTempC" unit="°C" title="Raw model traces: summit temperature" note={`Forecast target ${climb.summitM.toLocaleString()} m (summit). WeatherNext surface temperature is excluded from this chart. Missing values are gaps, not zeros.`} /><RawModelLineChart forecast={forecast} metricKey="summitWindKph" unit="kph" title="Raw model traces: wind guidance" note="Daily peak gust where available, otherwise peak 10m wind, at the requested objective. No vertical summit-wind interpolation is applied. WeatherNext uses an ensemble-mean wind statistic and is shown separately." /><RawModelLineChart forecast={forecast} metricKey="precipMm" unit="mm" title="Raw model traces: daily precipitation" note="Common field across providers, including WeatherNext in magenta. Full local-day totals only; partial WeatherNext days remain gaps." /><RawModelLineChart forecast={forecast} metricKey="cloudCoverPct" unit="%" title="Raw model traces: total cloud cover" note="Common field across providers, including WeatherNext in magenta. Compare cloud patterns without mixing surface and summit temperature/wind." /></div><ModelAvailabilityPanel forecast={forecast} climb={climb} unavailableModels={unavailableModels} weatherNext={weatherState.data?.weatherNext} /></>}
+    {hasLiveData && <><WindowTimeline forecast={forecast} bestWindow={bestWindow} source={source} climb={climb} /><div className="grid gap-4 lg:grid-cols-2"><RawModelLineChart forecast={forecast} metricKey="summitTempC" unit="°C" title="Raw model traces: summit temperature" note={`Forecast target ${climb.summitM.toLocaleString()} m (summit). WeatherNext surface temperature is excluded from this chart. Missing values are gaps, not zeros.`} /><RawModelLineChart forecast={forecast} metricKey="summitWindKph" unit="kph" title="Raw model traces: wind guidance" note="Comparable daily peak grid-cell 10 m gusts only. Models that provide only 10 m wind speeds are omitted from gust consensus; free-air upper-level winds are treated separately." /><RawModelLineChart forecast={forecast} metricKey="precipMm" unit="mm" title="Raw model traces: daily precipitation" note="Common field across providers, including WeatherNext in magenta. Full local-day totals only; partial-day guidance is shown as a separate caution and excluded from full-day consensus." /><RawModelLineChart forecast={forecast} metricKey="cloudCoverPct" unit="%" title="Raw model traces: total cloud cover" note="Common field across providers, including WeatherNext in magenta. Compare cloud patterns without mixing surface and summit temperature/wind." /></div><ModelAvailabilityPanel forecast={forecast} climb={climb} unavailableModels={unavailableModels} weatherNext={weatherState.data?.weatherNext} /></>}
     <AlertRulePanel climb={climb} mode={mode} setMode={setMode} />
     <div className="flex flex-wrap gap-2 rounded-2xl bg-white p-1 shadow-sm"><TabButton active={tab === "forecast"} onClick={() => setTab("forecast")}>Forecast</TabButton><TabButton active={tab === "corn"} onClick={() => setTab("corn")}>Snow Surface</TabButton><TabButton active={tab === "lookback"} onClick={() => setTab("lookback")}>14-day lookback</TabButton><TabButton active={tab === "avalanche"} onClick={() => setTab("avalanche")}>Avalanche</TabButton><TabButton active={tab === "alerts"} onClick={() => setTab("alerts")}>Alerts</TabButton><TabButton active={tab === "map"} onClick={() => setTab("map")}>Map</TabButton><TabButton active={tab === "logic"} onClick={() => setTab("logic")}>Scoring logic</TabButton></div>
-    {tab === "forecast" && <div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><WindIcon /> Forecast: wind guidance</h3><p className="mb-3 text-xs text-slate-500">Top curve: grid-cell peak 10m gust/wind. Mid/valley curves are approximate 75%/45% scalings, not independent elevation forecasts.</p><MiniLineChart data={combinedChart} series={[{ key: "summitWindAvg", label: "Grid wind/gust", unit: "kph", className: "text-slate-900" }, { key: "midWindAvg", label: "Mid-mountain estimate", unit: "kph", className: "text-slate-500" }, { key: "valleyWindAvg", label: "Valley estimate", unit: "kph", className: "text-slate-400" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SunIcon /> Forecast: summit temperature swing</h3><MiniLineChart data={combinedChart} series={[{ key: "summitTempAvg", label: "Summit avg", unit: "°C", className: "text-slate-900" }, { key: "summitTempMinAvg", label: "Summit low", unit: "°C", className: "text-slate-500" }, { key: "summitTempMaxAvg", label: "Summit high", unit: "°C", className: "text-slate-400" }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><RainIcon /> Forecast: summit rain</h3><MiniLineChart data={combinedChart} series={[{ key: "summitRainAvg", label: "Summit rain", unit: "mm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SnowIcon /> Forecast: summit snow</h3><MiniLineChart data={combinedChart} series={[{ key: "summitSnowAvg", label: "Summit snow", unit: "cm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><MountainIcon /> Freezing level</h3><MiniLineChart data={combinedChart} series={[{ key: "freezingLevelM", label: "Freezing level", unit: "m", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-1 flex items-center gap-2 font-semibold"><GaugeIcon /> Pressure</h3><p className="mb-3 text-sm text-slate-500">Mean-sea-level pressure shown on a realistic 950–1050 hPa operating scale so synoptic changes are visible.</p><MiniLineChart data={combinedChart} series={[{ key: "pressureHpa", label: "Pressure", unit: "hPa", color: "#7c3aed", dash: "", width: 3.5 }]} minOverride={950} maxOverride={1050} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SunIcon /> Cloud cover + visibility</h3><MiniLineChart data={combinedChart} series={[{ key: "cloudCoverPct", label: "Total cloud", unit: "%", color: "#111827", dash: "", width: 3.5 }, { key: "cloudCoverLowPct", label: "Low cloud", unit: "%", color: "#dc2626", dash: "2 5", width: 3 }, { key: "cloudCoverMidPct", label: "Mid cloud", unit: "%", color: "#f59e0b", dash: "8 4", width: 3 }, { key: "cloudCoverHighPct", label: "High cloud", unit: "%", color: "#7c3aed", dash: "5 4", width: 3 }]} minOverride={0} maxOverride={100} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><ShieldIcon /> Solar reliability / navigation visibility</h3><MiniLineChart data={combinedChart} series={[{ key: "solarReliabilityPct", label: "Solar reliability", unit: "%", color: "#059669", dash: "", width: 3.5 }, { key: "navigationVisibilityPct", label: "Navigation visibility", unit: "%", color: "#2563eb", dash: "8 4", width: 3 }]} minOverride={0} maxOverride={100} /></CardContent></Card></div>}
+    {tab === "forecast" && <div className="grid gap-4 lg:grid-cols-2"><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><WindIcon /> Forecast: wind guidance</h3><p className="mb-3 text-xs text-slate-500">Daily consensus of available model grid-cell peak 10 m gusts; no 45%/75% scaling. Models that only provide 10 m mean wind are not treated as gust models. This is not terrain-corrected ridge wind. Operational cautions above flag strong free-air flow where relevant.</p><MiniLineChart data={combinedChart} series={windSeries} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SunIcon /> Forecast: summit temperature swing</h3><MiniLineChart data={combinedChart} series={[{ key: "summitTempAvg", label: "Summit avg", unit: "°C", className: "text-slate-900" }, { key: "summitTempMinAvg", label: "Summit low", unit: "°C", className: "text-slate-500" }, { key: "summitTempMaxAvg", label: "Summit high", unit: "°C", className: "text-slate-400" }]} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><RainIcon /> Forecast: summit rain</h3><MiniLineChart data={combinedChart} series={[{ key: "summitRainAvg", label: "Summit rain", unit: "mm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SnowIcon /> Forecast: summit snow</h3><p className="mb-3 text-xs text-slate-500">Daily model forecast snowfall (cm), not settled snow depth. Implausible source fields are excluded; check the operational cautions above when a source fails validation.</p><MiniLineChart data={combinedChart} series={[{ key: "summitSnowAvg", label: "Summit snow", unit: "cm", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><MountainIcon /> Freezing level</h3><MiniLineChart data={combinedChart} series={[{ key: "freezingLevelM", label: "Freezing level", unit: "m", className: "text-slate-900" }]} minOverride={0} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-1 flex items-center gap-2 font-semibold"><GaugeIcon /> Pressure</h3><p className="mb-3 text-sm text-slate-500">Mean-sea-level pressure shown on a realistic 950–1050 hPa operating scale so synoptic changes are visible.</p><MiniLineChart data={combinedChart} series={[{ key: "pressureHpa", label: "Pressure", unit: "hPa", color: "#7c3aed", dash: "", width: 3.5 }]} minOverride={950} maxOverride={1050} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><SunIcon /> Cloud cover + visibility</h3><MiniLineChart data={combinedChart} series={[{ key: "cloudCoverPct", label: "Total cloud", unit: "%", color: "#111827", dash: "", width: 3.5 }, { key: "cloudCoverLowPct", label: "Low cloud", unit: "%", color: "#dc2626", dash: "2 5", width: 3 }, { key: "cloudCoverMidPct", label: "Mid cloud", unit: "%", color: "#f59e0b", dash: "8 4", width: 3 }, { key: "cloudCoverHighPct", label: "High cloud", unit: "%", color: "#7c3aed", dash: "5 4", width: 3 }]} minOverride={0} maxOverride={100} /></CardContent></Card><Card><CardContent className="p-5"><h3 className="mb-4 flex items-center gap-2 font-semibold"><ShieldIcon /> Solar reliability / navigation visibility</h3><MiniLineChart data={combinedChart} series={[{ key: "solarReliabilityPct", label: "Solar reliability", unit: "%", color: "#059669", dash: "", width: 3.5 }, { key: "navigationVisibilityPct", label: "Navigation visibility", unit: "%", color: "#2563eb", dash: "8 4", width: 3 }]} minOverride={0} maxOverride={100} /></CardContent></Card></div>}
     {tab === "corn" && <SnowSurfacePanel climb={climb} forecast={forecast} avalanche={avalanche} />}
     {tab === "lookback" && <div className="space-y-4"><LookbackPanel climb={climb} history={history} historySource={historySource} /><WeatherNextLookback climb={climb} history={history} timeZone={weatherState.data?.timeZone} Chart={MiniLineChart} /></div>}
     {tab === "avalanche" && <AvalanchePanel data={avalancheState.data} loading={avalancheState.loading} error={avalancheState.error} />}

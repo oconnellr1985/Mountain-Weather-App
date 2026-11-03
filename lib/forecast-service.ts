@@ -1,5 +1,7 @@
 import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext } from "./weather-next-data";
+import { assessDailyCoverage, validateSnowfall, comparableWindGust } from "./forecast-validation";
 import { fetchWeatherNextPoint, safeWeatherNextError, weatherNextConfiguration } from "./weather-next-server";
+import { PROFILE_VARIABLES, PRESSURE_LEVELS, summarizePressureProfile, diagnosePrecipitationPhase, precipitationCategoryAgreement, parseElevationResponse } from "./vertical-guidance";
 
 type ModelConfig = {
   id: string;
@@ -58,7 +60,8 @@ const CLOUD_HOURLY = ["cloud_cover", "cloud_cover_low", "cloud_cover_mid", "clou
 const RADIATION_HOURLY = ["shortwave_radiation", "direct_radiation", "diffuse_radiation"];
 
 const REQUEST_TIERS = [
-  { name: "full", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
+  { name: "full", fields: [...CORE_HOURLY, "dew_point_2m", ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
+  { name: "no-dewpoint", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
   { name: "no-radiation", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY] },
   { name: "weather-cloud", fields: [...CORE_HOURLY, ...CLOUD_HOURLY] },
   { name: "core", fields: CORE_HOURLY },
@@ -70,6 +73,7 @@ const isNum = (v: any) => typeof v === "number" && Number.isFinite(v);
 const clean = (a: any[]) => a.filter(isNum);
 const avg = (a: any[]) => { const c = clean(a); return c.length ? c.reduce((s, v) => s + v, 0) / c.length : null; };
 const sum = (a: any[]) => clean(a).reduce((s, v) => s + v, 0);
+const sumOrNull = (a: any[]) => clean(a).length ? sum(a) : null;
 const max = (a: any[]) => { const c = clean(a); return c.length ? Math.max(...c) : null; };
 const min = (a: any[]) => { const c = clean(a); return c.length ? Math.min(...c) : null; };
 const spread = (a: any[]) => { const c = clean(a); return c.length > 1 ? Math.max(...c) - Math.min(...c) : 0; };
@@ -115,18 +119,18 @@ function isVariableError(message: string) {
   return /invalid.*variable|variable.*not.*available|unsupported.*variable|cannot initialize.*variable|unknown.*variable/i.test(message);
 }
 
-function urlFor(model: ModelConfig, lat: number, lon: number, summitM: number, fields: string[]) {
+function urlFor(model: ModelConfig, lat: number, lon: number, summitM: number, fields: string[], elevations?: number[], modelOverride?: string) {
   if (!model.endpoint) return null;
   const url = new URL(model.endpoint);
-  url.searchParams.set("latitude", String(lat));
-  url.searchParams.set("longitude", String(lon));
+  url.searchParams.set("latitude", elevations ? elevations.map(() => lat).join(",") : String(lat));
+  url.searchParams.set("longitude", elevations ? elevations.map(() => lon).join(",") : String(lon));
   url.searchParams.set("hourly", fields.join(","));
   url.searchParams.set("wind_speed_unit", "kmh");
   url.searchParams.set("precipitation_unit", "mm");
   url.searchParams.set("timezone", "auto");
   url.searchParams.set("forecast_days", String(Math.min(16, Math.max(1, Math.ceil(model.maxLeadDays)))));
-  url.searchParams.set("elevation", String(Math.round(summitM)));
-  if (model.models) url.searchParams.set("models", model.models);
+  url.searchParams.set("elevation", elevations ? elevations.map(x => Math.round(x)).join(",") : String(Math.round(summitM)));
+  if (modelOverride || model.models) url.searchParams.set("models", modelOverride || model.models!);
   return url.toString();
 }
 
@@ -140,6 +144,8 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   const rain = pick("rain");
   const snow = pick("snowfall");
   const pressure = pick("pressure_msl");
+  const dewpoint = pick("dew_point_2m");
+
   const freezing = pick("freezing_level_height");
   const cloud = pick("cloud_cover");
   const cloudLow = pick("cloud_cover_low");
@@ -149,9 +155,10 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   const direct = pick("direct_radiation");
   const diffuse = pick("diffuse_radiation");
 
-  const peakWind = max(gust) ?? max(wind);
+  const windValues = comparableWindGust(max(gust), max(wind));
   const temp = avg(temps);
-  if (!isNum(temp) && !isNum(peakWind) && precip.length === 0) return null;
+  if (!isNum(temp) && !isNum(windValues.gustKph) && !isNum(windValues.wind10mKph) && precip.length === 0) return null;
+  const snowValidity = validateSnowfall(sumOrNull(snow), sumOrNull(precip));
 
   return {
     modelId: model.id,
@@ -161,23 +168,33 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     includeInConsensus: model.includeInConsensus !== false,
     dayIndex: null,
     date,
-    summitWindKph: peakWind,
-    windBasis: gust.length ? "daily_peak_gust" : "daily_peak_10m_wind",
-    midWindKph: isNum(peakWind) ? peakWind * 0.75 : null,
-    valleyWindKph: isNum(peakWind) ? peakWind * 0.45 : null,
+    // Only 10 m gusts are used in the cross-model gust consensus.
+    // A 10 m mean wind is recorded separately, NEVER treated as a gust fallback.
+    summitWindKph: windValues.gustKph,
+    summitMeanWind10mKph: windValues.wind10mKph,
+    windBasis: gust.length ? "daily_peak_gust" : "10m_wind_only_no_gust",
+    midWindKph: null,
+    valleyWindKph: null,
     summitTempC: temp,
     summitTempMinC: min(temps),
     summitTempMaxC: max(temps),
-    midTempC: isNum(temp) ? temp + 5 : null,
-    valleyTempC: isNum(temp) ? temp + 10 : null,
-    precipMm: sum(precip),
-    summitRainMm: sum(rain),
-    summitSnowCm: sum(snow),
-    midRainMm: sum(rain),
-    midSnowCm: sum(snow),
-    valleyRainMm: sum(rain),
-    valleySnowCm: sum(snow),
+    midTempC: null,
+    valleyTempC: null,
+    precipMm: sumOrNull(precip),
+    summitRainMm: sumOrNull(rain),
+    summitSnowCm: snowValidity.value,
+    rawSummitSnowCm: sumOrNull(snow),
+    dataQualityWarnings: snowValidity.warning ? [snowValidity.warning] : [],
+    midRainMm: null,
+    midSnowCm: null,
+    valleyRainMm: null,
+    valleySnowCm: null,
     pressureHpa: avg(pressure),
+    dewPointC: avg(dewpoint),
+    atmosphericProfile: [],
+    phaseDiagnostic: diagnosePrecipitationPhase(hourly, idx, 0), // Recomputed with actual summit elevation below.
+    precipitationPhaseNote: "Model rain/snow values unchanged; near-freezing phase is a diagnostic only.",
+    elevationAdjustmentNote: "Open-Meteo downscaled temperature at requested elevation; not a separate valley grid cell.",
     freezingLevelM: avg(freezing),
     cloudCoverPct: avg(cloud),
     cloudCoverLowPct: avg(cloudLow),
@@ -189,21 +206,28 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   };
 }
 
-async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM: number) {
+async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM: number, midM: number, valleyM: number) {
   if (!model.endpoint) throw new Error(model.note || "connector not implemented");
 
   let json: any = null;
+  let surfaceRows: any[] = [];
   let requestTier = "";
+  const elevations = [summitM, midM, valleyM];
+  let elevationRequestStatus = "unavailable";
   let lastError = "";
 
   for (const tier of REQUEST_TIERS) {
     try {
-      json = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields)!);
+      const response = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields, elevations)!);
+      surfaceRows = parseElevationResponse(response, elevations.length);
+      json = surfaceRows[0];
+      elevationRequestStatus = "three-elevation";
       requestTier = tier.name;
       break;
     } catch (error: any) {
       lastError = String(error?.message || error || "request failed");
       if (isDomainError(lastError)) throw new Error(`out of domain at ${lat.toFixed(3)}, ${lon.toFixed(3)}`);
+      if (/incomplete elevation response/i.test(lastError)) break; // retry with single summit location below
       if (isVariableError(lastError)) continue;
       // Some Open-Meteo model endpoints report generic validation errors for unavailable derived fields.
       // Permit one lower-feature retry before giving up.
@@ -212,7 +236,35 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
     }
   }
 
+  // Not all model endpoints accept multi-location calls. Fall back to summit-only,
+  // and explicitly leave lower-elevation outputs unavailable instead of inventing them.
+  if (!json) for (const tier of REQUEST_TIERS) {
+    try {
+      json = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields)!);
+      surfaceRows = parseElevationResponse(json, 1);
+      elevationRequestStatus = "summit-only";
+      requestTier = tier.name;
+      break;
+    } catch (error: any) {
+      lastError = String(error?.message || error || "request failed");
+      if (isDomainError(lastError)) throw new Error(`out of domain at ${lat.toFixed(3)}, ${lon.toFixed(3)}`);
+      if (!isVariableError(lastError) && !/invalid|not available|unsupported|cannot initialize/i.test(lastError)) throw error;
+    }
+  }
   if (!json) throw new Error(lastError || "No supported variable set returned data");
+  // Separate optional free-atmosphere profile request: its failure NEVER suppresses
+  // the model's main surface forecast. ECMWF HRES 9 km needs IFS025 for pressure data.
+  let upperAir: any = null;
+  let upperAirSource: string | null = null;
+  if (["gfs", "ecmwf_ifs", "gem_global", "gem_regional"].includes(model.id)) {
+    const modelAlias = model.id === "ecmwf_ifs" ? "ecmwf_ifs025" : model.models;
+    for (const fields of [PROFILE_VARIABLES, PROFILE_VARIABLES.filter(v => !v.startsWith("relative_humidity_"))]) {
+      try {
+        const raw = await fetchJson(urlFor(model, lat, lon, summitM, fields, undefined, modelAlias)! , 1);
+        if (Array.isArray(raw?.hourly?.time)) { upperAir = raw.hourly; upperAirSource = modelAlias || null; break; }
+      } catch { /* Optional upper-air data; surface guidance remains valid. */ }
+    }
+  }
   if (!json.hourly || !Array.isArray(json.hourly.time)) throw new Error(json.reason || json.error || "No hourly data returned");
 
   const byDay = new Map<string, number[]>();
@@ -222,6 +274,12 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
     byDay.get(key)!.push(i);
   });
 
+  const elevationData = surfaceRows.slice(1).map(row => row.hourly || {});
+  const temperatureAtDay = (hourly: any, date: string) => {
+    const values = (hourly.time || []).map((t: string, i: number) => dayKey(t) === date ? hourly.temperature_2m?.[i] : null);
+    return { average: avg(values), min: min(values), max: max(values) };
+  };
+  const profileIndices = (date: string) => (upperAir?.time || []).flatMap((t: string, i: number) => dayKey(t) === date ? [i] : []);
   const daily = Array.from(byDay.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, indices], i) => {
@@ -229,6 +287,35 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
+        // Open-Meteo hourly ISO strings use the offset resolved at request time (fixed across DST).
+        // Its forecast-day response therefore contains 24 slots even on civil DST change dates.
+        row.dailyCoverage = assessDailyCoverage(indices.length, 24);
+        // This model may still provide valuable partial-day hazard guidance, but must
+        // not bias a complete calendar-day multi-model comparison or recommendation.
+        row.includeInConsensus = row.includeInConsensus && row.dailyCoverage.complete;
+        const middle = elevationData[0] ? temperatureAtDay(elevationData[0], date) : null;
+        const lower = elevationData[1] ? temperatureAtDay(elevationData[1], date) : null;
+        row.midTempC = middle?.average ?? null;
+        row.midTempMinC = middle?.min ?? null;
+        row.midTempMaxC = middle?.max ?? null;
+        row.valleyTempC = lower?.average ?? null;
+        row.valleyTempMinC = lower?.min ?? null;
+        row.valleyTempMaxC = lower?.max ?? null;
+        row.phaseDiagnostic = diagnosePrecipitationPhase(json.hourly, indices, summitM);
+        row.requestedElevationsM = { summit: summitM, mid: midM, lower: valleyM };
+        row.returnedElevationsM = surfaceRows.map(x => Number.isFinite(x.elevation) ? x.elevation : null);
+        row.elevationRequestStatus = elevationRequestStatus;
+        if (upperAir) {
+          const p = summarizePressureProfile(upperAir, profileIndices(date), { summit: summitM, mid: midM, lower: valleyM });
+          row.summitFreeAirWindKph = p.summitFreeAirWindKph;
+          row.midFreeAirWindKph = p.midFreeAirWindKph;
+          row.lowerFreeAirWindKph = p.lowerFreeAirWindKph;
+          row.atmosphericProfile = p.levelData;
+          row.upperAirSource = upperAirSource;
+          row.upperAirHours = p.hoursWithProfile;
+        }
+        row.midWindKph = row.midFreeAirWindKph ?? null;
+        row.valleyWindKph = row.lowerFreeAirWindKph ?? null;
         row.cloudFieldsAvailable = Array.isArray(json.hourly.cloud_cover);
         row.radiationFieldsAvailable = Array.isArray(json.hourly.shortwave_radiation);
         row.freezingLevelAvailable = Array.isArray(json.hourly.freezing_level_height);
@@ -260,15 +347,17 @@ export function aggregate(results: any[]) {
     if (!allValues.length) continue;
 
     const consensusValues = allValues.filter((value: any) => value.includeInConsensus !== false && value.weight > 0);
-    const basis = consensusValues.length ? consensusValues : allValues.filter((value: any) => value.modelId !== WEATHER_NEXT_ID);
+    const basis = consensusValues;
+    // Never restore partial-day, stale, blended or unavailable forecasts as consensus.
+    if (!basis.length) continue;
 
     const weighted = (key: string) => weightedAvg(basis.map((value: any) => ({ value: value[key], weight: value.weight || 1 })));
-    const weightedZero = (key: string) => weighted(key) ?? 0;
+    const nullableBounds = (key: string) => { const center = weighted(key); if (!isNum(center)) return [null, null]; const width = spread(basis.map((v: any) => v[key])); return [round1(center - width / 2), round1(center + width / 2)]; };
     const average = (key: string) => avg(basis.map((value: any) => value[key]));
 
-    const summitWind = weightedZero("summitWindKph");
-    const summitTemp = weightedZero("summitTempC");
-    const precip = weightedZero("precipMm");
+    const summitWind = weighted("summitWindKph");
+    const summitTemp = weighted("summitTempC");
+    const precip = weighted("precipMm");
     const windSpread = spread(basis.map((value: any) => value.summitWindKph));
     const tempSpread = spread(basis.map((value: any) => value.summitTempC));
     const precipSpread = spread(basis.map((value: any) => value.precipMm));
@@ -280,28 +369,28 @@ export function aggregate(results: any[]) {
 
       // Legacy field names retained because the frontend uses these as lower/upper consensus traces,
       // not literal GFS-vs-ECMWF values.
-      summitWindGfsKph: round1(summitWind - windSpread / 2),
-      summitWindEcmwfKph: round1(summitWind + windSpread / 2),
-      midWindGfsKph: round1(weightedZero("midWindKph") - spread(basis.map((v: any) => v.midWindKph)) / 2),
-      midWindEcmwfKph: round1(weightedZero("midWindKph") + spread(basis.map((v: any) => v.midWindKph)) / 2),
-      valleyWindGfsKph: round1(weightedZero("valleyWindKph") - spread(basis.map((v: any) => v.valleyWindKph)) / 2),
-      valleyWindEcmwfKph: round1(weightedZero("valleyWindKph") + spread(basis.map((v: any) => v.valleyWindKph)) / 2),
+      summitWindGfsKph: isNum(summitWind) ? round1(summitWind - windSpread / 2) : null,
+      summitWindEcmwfKph: isNum(summitWind) ? round1(summitWind + windSpread / 2) : null,
+      midWindGfsKph: nullableBounds("midWindKph")[0],
+      midWindEcmwfKph: nullableBounds("midWindKph")[1],
+      valleyWindGfsKph: nullableBounds("valleyWindKph")[0],
+      valleyWindEcmwfKph: nullableBounds("valleyWindKph")[1],
 
-      summitTempGfsC: round1(summitTemp - tempSpread / 2),
-      summitTempEcmwfC: round1(summitTemp + tempSpread / 2),
+      summitTempGfsC: isNum(summitTemp) ? round1(summitTemp - tempSpread / 2) : null,
+      summitTempEcmwfC: isNum(summitTemp) ? round1(summitTemp + tempSpread / 2) : null,
       summitTempMinAvgC: round1(average("summitTempMinC") ?? summitTemp),
       summitTempMaxAvgC: round1(average("summitTempMaxC") ?? summitTemp),
-      midTempGfsC: round1(weightedZero("midTempC") - spread(basis.map((v: any) => v.midTempC)) / 2),
-      midTempEcmwfC: round1(weightedZero("midTempC") + spread(basis.map((v: any) => v.midTempC)) / 2),
-      valleyTempGfsC: round1(weightedZero("valleyTempC") - spread(basis.map((v: any) => v.valleyTempC)) / 2),
-      valleyTempEcmwfC: round1(weightedZero("valleyTempC") + spread(basis.map((v: any) => v.valleyTempC)) / 2),
+      midTempGfsC: nullableBounds("midTempC")[0],
+      midTempEcmwfC: nullableBounds("midTempC")[1],
+      valleyTempGfsC: nullableBounds("valleyTempC")[0],
+      valleyTempEcmwfC: nullableBounds("valleyTempC")[1],
 
-      precipGfsMm: round1(Math.max(0, precip - precipSpread / 2)),
-      precipEcmwfMm: round1(precip + Math.min(precip, precipSpread / 2)),
-      summitRainGfsMm: round1(weightedZero("summitRainMm")),
-      summitRainEcmwfMm: round1(weightedZero("summitRainMm")),
-      summitSnowGfsCm: round1(weightedZero("summitSnowCm")),
-      summitSnowEcmwfCm: round1(weightedZero("summitSnowCm")),
+      precipGfsMm: isNum(precip) ? round1(Math.max(0, precip - precipSpread / 2)) : null,
+      precipEcmwfMm: isNum(precip) ? round1(precip + Math.min(precip, precipSpread / 2)) : null,
+      summitRainGfsMm: round1(weighted("summitRainMm")),
+      summitRainEcmwfMm: round1(weighted("summitRainMm")),
+      summitSnowGfsCm: round1(weighted("summitSnowCm")),
+      summitSnowEcmwfCm: round1(weighted("summitSnowCm")),
 
       freezingLevelM: round0(weighted("freezingLevelM")),
       pressureHpa: round0(weighted("pressureHpa")),
@@ -313,6 +402,29 @@ export function aggregate(results: any[]) {
       directRadiationWm2: round1(weighted("directRadiationWm2")),
       diffuseRadiationWm2: round1(weighted("diffuseRadiationWm2")),
 
+      altitudeGuidance: {
+        summitM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.summit ?? null,
+        midM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.mid ?? null,
+        lowerM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.lower ?? null,
+        summitFreeAirWindKph: round1(weighted("summitFreeAirWindKph")),
+        midFreeAirWindKph: round1(weighted("midFreeAirWindKph")),
+        lowerFreeAirWindKph: round1(weighted("lowerFreeAirWindKph")),
+        midTempC: round1(weighted("midTempC")),
+        midTempMinC: round1(weighted("midTempMinC")),
+        midTempMaxC: round1(weighted("midTempMaxC")),
+        lowerTempC: round1(weighted("valleyTempC")),
+        lowerTempMinC: round1(weighted("valleyTempMinC")),
+        lowerTempMaxC: round1(weighted("valleyTempMaxC")),
+        temperatureModels: basis.filter((v: any) => isNum(v.midTempC) && isNum(v.valleyTempC)).length,
+        upperAirModels: basis.filter((v: any) => isNum(v.summitFreeAirWindKph)).length,
+      },
+      phaseGuidance: {
+        modelsWithPrecipitation: basis.filter((v: any) => (v.phaseDiagnostic?.precipHours ?? 0) > 0).length,
+        modelsFlaggingUncertainPhase: basis.filter((v: any) => v.phaseDiagnostic?.uncertainHours > 0).length,
+        uncertainPhasePrecipMeanMm: round1(avg(basis.map((v: any) => v.phaseDiagnostic?.uncertainPrecipMm))),
+        note: "Near-freezing precipitation phase diagnostic; native rain/snow quantities unchanged.",
+      },
+      atmosphericProfiles: allValues.filter((v: any) => v.atmosphericProfile?.some((p: any) => isNum(p.maxWindKph) || isNum(p.relativeHumidityPct))).map((v: any) => ({ modelId: v.modelId, modelLabel: v.modelLabel, sourceModel: v.upperAirSource, levels: v.atmosphericProfile })),
       modelStats: {
         modelCount: allValues.length,
         consensusModelCount: basis.length,
@@ -325,16 +437,23 @@ export function aggregate(results: any[]) {
         consensusModels: basis.map((value: any) => value.modelLabel),
         guidanceOnlyModels: allValues.filter((value: any) => value.includeInConsensus === false).map((value: any) => value.modelLabel),
         weightedModels: basis.map((value: any) => `${value.modelLabel} (${value.weight})`),
-        windSpreadKph: round1(windSpread),
+        windSpreadKph: basis.filter((v: any) => isNum(v.summitWindKph)).length > 1 ? round1(windSpread) : null,
+        windBasis: "daily peak 10m gust only",
+        windOnlyModelsExcluded: allValues.filter((v: any) => !isNum(v.summitWindKph) && isNum(v.summitMeanWind10mKph)).map((v: any) => v.modelLabel),
         tempSpreadC: round1(tempSpread),
-        precipSpreadMm: round1(precipSpread),
+        precipSpreadMm: basis.filter((v: any) => isNum(v.precipMm)).length > 1 ? round1(precipSpread) : null,
         weatherNextPrecipDeltaMm: (() => {
           const wn = basis.find((v: any) => v.modelId === WEATHER_NEXT_ID && isNum(v.precipMm));
           const others = basis.filter((v: any) => v.modelId !== WEATHER_NEXT_ID);
           const without = weightedAvg(others.map((v: any) => ({ value: v.precipMm, weight: v.weight })));
           return wn && isNum(without) ? round1(precip - without) : null;
         })(),
+        precipitationAgreement: precipitationCategoryAgreement(basis.map((v: any) => v.precipMm)),
+        freezingSpreadM: basis.filter((v: any) => isNum(v.freezingLevelM)).length > 1 ? round0(spread(basis.map((v: any) => v.freezingLevelM))) : null,
+        fieldModelCountsByVariable: { wind: basis.filter((v: any) => isNum(v.summitWindKph)).length, upperAirWind: basis.filter((v: any) => isNum(v.midFreeAirWindKph)).length, temperature: basis.filter((v: any) => isNum(v.summitTempC)).length, lowerTemperature: basis.filter((v: any) => isNum(v.valleyTempC)).length, precipitation: basis.filter((v: any) => isNum(v.precipMm)).length, freezing: basis.filter((v: any) => isNum(v.freezingLevelM)).length },
         cloudSpreadPct: round1(spread(basis.map((value: any) => value.cloudCoverPct))),
+        partialDayModels: allValues.filter((v: any) => v.dailyCoverage?.complete === false).map((v: any) => ({ id: v.modelId, label: v.modelLabel, hours: v.dailyCoverage.hours, expectedHours: v.dailyCoverage.expectedHours, precipitationMm: v.precipMm })),
+        dataQualityWarnings: allValues.flatMap((v: any) => (v.dataQualityWarnings || []).map((warning: string) => `${v.modelLabel}: ${warning}`)),
       },
 
       modelValues: allValues.map((value: any) => ({ ...value })),
@@ -389,7 +508,11 @@ async function history(lat: number, lon: number, summitM: number) {
   }
 }
 
-export async function getWeatherData({ lat, lon, summitM, region = "global" }: { lat: number; lon: number; summitM: number; region?: string }) {
+export async function getWeatherData({ lat, lon, summitM, midM, valleyM, region = "global" }: { lat: number; lon: number; summitM: number; midM?: number; valleyM?: number; region?: string }) {
+  // Representative targets are explicit and auditable, not hardcoded weather adjustments.
+  // If the caller does not know route elevations, use provisional bands and flag them.
+  const lowerTargetM = isNum(valleyM) && valleyM < summitM ? valleyM : Math.max(0, summitM - 1200);
+  const midTargetM = isNum(midM) && midM > lowerTargetM && midM < summitM ? midM : Math.round((summitM + lowerTargetM) / 2);
   const models = MODEL_CATALOG.filter(model => applies(model, region));
   const successful: any[] = [];
   const unavailableModels: string[] = [];
@@ -401,7 +524,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   const historyPromise = history(lat, lon, summitM);
   for (const model of models.filter(m => m.id !== WEATHER_NEXT_ID)) {
     try {
-      successful.push(await fetchModel(model, lat, lon, summitM));
+      successful.push(await fetchModel(model, lat, lon, summitM, midTargetM, lowerTargetM));
       await delay(180);
     } catch (error: any) {
       unavailableModels.push(model.label + ": " + (error?.message || "unavailable"));
@@ -436,7 +559,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   }
   return {
     source: "Direct model-specific Open-Meteo feeds, with Google WeatherNext 3 via Earth Engine when authorized. WeatherNext uses native grid surface temperature/wind; complete-day precipitation, cloud, pressure and solar means enter the weighted analysis as one additional source. No WeatherNext summit adjustment, snowfall split or freezing level is inferred. RAP remains NO DATA pending a direct connector.",
-    target: { latitude: lat, longitude: lon, elevationM: summitM, windBasis: "grid-cell 10m wind/gust; no summit interpolation", precipitationBasis: "grid-area total; no summit-specific correction" },
+    target: { latitude: lat, longitude: lon, elevationM: summitM, midElevationM: midTargetM, lowerElevationM: lowerTargetM, targetElevationIsApproximate: !isNum(valleyM), windBasis: "grid-cell 10m peak gust/wind; pressure-level winds separately interpolated at actual model geopotential heights (free atmosphere, not terrain wind)", precipitationBasis: "grid-area total; provider rain/snow partition with independent wet-bulb/freezing-level uncertainty diagnostics", elevationGuidance: "Open-Meteo multi-location elevation-downscaled temperature at same coordinates; pressure-level interpolated wind is free-air and is not a ridge/valley surface forecast" },
     unavailableModels, weatherNext, timeZone: successful.find(r => r.timeZone)?.timeZone,
     modelCatalog: models.map(model => ({
       id: model.id, label: model.label, provider: model.provider, maxLeadDays: model.maxLeadDays,
