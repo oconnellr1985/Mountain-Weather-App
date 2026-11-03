@@ -1,4 +1,4 @@
-import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext, expectedHours } from "./weather-next-data";
+import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext } from "./weather-next-data";
 import { assessDailyCoverage, validateSnowfall, comparableWindGust } from "./forecast-validation";
 import { fetchWeatherNextPoint, safeWeatherNextError, weatherNextConfiguration } from "./weather-next-server";
 import { PROFILE_VARIABLES, PRESSURE_LEVELS, summarizePressureProfile, diagnosePrecipitationPhase, precipitationCategoryAgreement, parseElevationResponse } from "./vertical-guidance";
@@ -287,7 +287,9 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
-        row.dailyCoverage = assessDailyCoverage(indices.length, expectedHours(date, json.timezone || "UTC"));
+        // Open-Meteo hourly ISO strings use the offset resolved at request time (fixed across DST).
+        // Its forecast-day response therefore contains 24 slots even on civil DST change dates.
+        row.dailyCoverage = assessDailyCoverage(indices.length, 24);
         // This model may still provide valuable partial-day hazard guidance, but must
         // not bias a complete calendar-day multi-model comparison or recommendation.
         row.includeInConsensus = row.includeInConsensus && row.dailyCoverage.complete;
