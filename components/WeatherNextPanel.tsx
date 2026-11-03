@@ -1,4 +1,5 @@
 "use client";
+import WeatherNextInterim from "./WeatherNextInterim";
 
 import React, { useId, useState } from "react";
 import { finite, WEATHER_NEXT_ID, weatherNextInsight } from "@/lib/weather-next-data";
@@ -108,6 +109,7 @@ export function WeatherNextElevationNote({ climb, status = {}, compact = false }
 
 export default function WeatherNextPanel({ forecast = [], status = {}, climb }: { forecast?: any[]; status?: any; climb?: any }) {
   const rows = forecast.map(d => ({ day: d, value: d.modelValues?.find((v: any) => v.modelId === WEATHER_NEXT_ID) })).filter(r => r.value);
+  const [showInterim, setShowInterim] = useState(false);
   const [chosenDate, setChosenDate] = useState("");
   const selected = rows.find(r => r.day.date === chosenDate) || rows[0];
   const value = selected?.value;
@@ -121,16 +123,16 @@ export default function WeatherNextPanel({ forecast = [], status = {}, climb }: 
     </div>
     <WeatherNextElevationNote climb={climb} status={status} />
     {!rows.length ? <p className="mt-3 text-sm text-amber-900">{status.message || "WeatherNext has not returned data for this forecast. Existing model analysis remains available."}</p> : <>
-      <p className="my-3 text-xs text-slate-600">Run initialized {new Date(value.runStart).toLocaleString("en-CA", { timeZone: "UTC", hour12: false })} UTC · local dates: {value.timeZone}. Complete, fresh local days contribute precipitation, cloud, pressure and solar means to consensus as one source (weight 0.75). Partial days and runs over 24 hours old are excluded.</p>
+      <p className="my-3 text-xs text-slate-600">Run initialized {new Date(value.runStart).toLocaleString("en-CA", { timeZone: "UTC", hour12: false })} UTC · local dates: {value.timeZone}. Fields with complete local-day coverage contribute to consensus as one source (weight 0.75). Runs over 24 hours old are excluded.</p>
       <div className="overflow-x-auto rounded-xl border">
         <table className="w-full min-w-[900px] text-left text-xs"><caption className="sr-only">WeatherNext daily surface guidance and analysis coverage</caption>
           <thead className="bg-violet-50"><tr>{["Date", "2m temp mean", "10m wind peak*", "Precipitation", "Low cloud", "Pressure", "Coverage", "In analysis"].map(h => <th key={h} className="p-2">{h}</th>)}</tr></thead>
           <tbody>{rows.map(({ day, value: v }) => <tr key={day.date} className="border-t">
             <th className="p-2 font-medium">{day.label} · {day.date}</th>
             <td className="p-2">{show(v.surfaceTempC, "°C")}</td><td className="p-2">{show(v.surfaceWindKph, " km/h")}</td>
-            <td className="p-2">{v.completeDay ? show(v.precipMm, " mm") : show(v.sampledPrecipMm, " mm") + " (partial)"}</td>
+            <td className="p-2">{finite(v.precipMm) ? show(v.precipMm, " mm") : show(v.sampledPrecipMm, " mm") + " (partial)"}</td>
             <td className="p-2">{show(v.cloudCoverLowPct, "%", 0)}</td><td className="p-2">{show(v.pressureHpa, " hPa", 0)}</td>
-            <td className="p-2">{v.hoursAvailable}/{v.expectedHours} h</td>
+            <td className="p-2">{v.hoursAvailable}/{v.expectedHours} h · precip {v.precipHoursAvailable}/{v.expectedHours}</td>
             <td className="p-2">{v.includeInConsensus ? "Compatible fields" : v.stale ? "No · stale" : "No · partial"}</td>
           </tr>)}</tbody>
         </table>
@@ -146,6 +148,8 @@ export default function WeatherNextPanel({ forecast = [], status = {}, climb }: 
         <HourlyBand hours={value.hourly} meanKey="surfaceWindKph" lowKey="surfaceWindP10Kph" highKey="surfaceWindP90Kph" title="10m surface wind" unit="km/h" timeZone={value.timeZone} />
         <HourlyBand hours={value.hourly} meanKey="precipMm" lowKey="precipP10Mm" highKey="precipP90Mm" title="Hourly precipitation" unit="mm" timeZone={value.timeZone} />
       </div>
+      <button type="button" className="mt-4 rounded border px-3 py-2 text-sm" aria-expanded={showInterim} onClick={() => setShowInterim(!showInterim)}>Compare recent interim cycle</button>
+      {showInterim && <WeatherNextInterim key={climb.id + value.runStart} climb={climb} timeZone={value.timeZone} mainStart={value.runStart} mainHours={rows.flatMap(row => row.value.hourly)} />}
       <p className="mt-3 text-xs text-slate-600">Percentile bands apply to individual hours. They are not summed into a daily precipitation range or treated as probabilities for a route window. Rain/snow partition and freezing level are unavailable in this feed.</p>
     </>}
     <details className="mt-4 text-xs text-slate-500"><summary className="cursor-pointer">Source, experimental status and terms</summary>

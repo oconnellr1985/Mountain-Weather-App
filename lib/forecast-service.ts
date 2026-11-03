@@ -1,4 +1,4 @@
-import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext } from "./weather-next-data";
+import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, accumulationDate, expectedHours, localDate, normalizeWeatherNext } from "./weather-next-data";
 import { fetchWeatherNextPoint, safeWeatherNextError, weatherNextConfiguration } from "./weather-next-server";
 
 type ModelConfig = {
@@ -124,21 +124,26 @@ function urlFor(model: ModelConfig, lat: number, lon: number, summitM: number, f
   url.searchParams.set("wind_speed_unit", "kmh");
   url.searchParams.set("precipitation_unit", "mm");
   url.searchParams.set("timezone", "auto");
+  url.searchParams.set("timeformat", "unixtime");
   url.searchParams.set("forecast_days", String(Math.min(16, Math.max(1, Math.ceil(model.maxLeadDays)))));
   url.searchParams.set("elevation", String(Math.round(summitM)));
   if (model.models) url.searchParams.set("models", model.models);
   return url.toString();
 }
 
-function summarize(model: ModelConfig, date: string, idx: number[], hourly: any) {
+function summarize(model: ModelConfig, date: string, idx: number[], precipIndices: number[], expected: number, hourly: any) {
   const pick = (key: string) => idx.map((i) => hourly[key]?.[i]).filter(isNum);
 
   const temps = pick("temperature_2m");
   const wind = pick("wind_speed_10m");
   const gust = pick("wind_gusts_10m");
-  const precip = pick("precipitation");
-  const rain = pick("rain");
-  const snow = pick("snowfall");
+  const accumulation = (key: string) => {
+    const values = precipIndices.map(i => hourly[key]?.[i]);
+    return values.length === expected && values.every(isNum) ? sum(values) : null;
+  };
+  const precip = accumulation("precipitation");
+  const rain = accumulation("rain");
+  const snow = accumulation("snowfall");
   const pressure = pick("pressure_msl");
   const freezing = pick("freezing_level_height");
   const cloud = pick("cloud_cover");
@@ -151,7 +156,7 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
 
   const peakWind = max(gust) ?? max(wind);
   const temp = avg(temps);
-  if (!isNum(temp) && !isNum(peakWind) && precip.length === 0) return null;
+  if (!isNum(temp) && !isNum(peakWind) && precip === null) return null;
 
   return {
     modelId: model.id,
@@ -170,13 +175,13 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     summitTempMaxC: max(temps),
     midTempC: isNum(temp) ? temp + 5 : null,
     valleyTempC: isNum(temp) ? temp + 10 : null,
-    precipMm: sum(precip),
-    summitRainMm: sum(rain),
-    summitSnowCm: sum(snow),
-    midRainMm: sum(rain),
-    midSnowCm: sum(snow),
-    valleyRainMm: sum(rain),
-    valleySnowCm: sum(snow),
+    precipMm: precip,
+    summitRainMm: rain,
+    summitSnowCm: snow,
+    midRainMm: rain,
+    midSnowCm: snow,
+    valleyRainMm: rain,
+    valleySnowCm: snow,
     pressureHpa: avg(pressure),
     freezingLevelM: avg(freezing),
     cloudCoverPct: avg(cloud),
@@ -216,8 +221,16 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
   if (!json.hourly || !Array.isArray(json.hourly.time)) throw new Error(json.reason || json.error || "No hourly data returned");
 
   const byDay = new Map<string, number[]>();
-  json.hourly.time.forEach((time: string, i: number) => {
-    const key = dayKey(time);
+  const precipByDay = new Map<string, number[]>();
+  const timeZone = json.timezone;
+  const seen = new Set<number>();
+  json.hourly.time.forEach((time: number, i: number) => {
+    if (!isNum(time) || seen.has(time)) return;
+    seen.add(time);
+    const key = localDate(time * 1000, timeZone);
+    const precipDate = accumulationDate(time * 1000, timeZone);
+    if (!precipByDay.has(precipDate)) precipByDay.set(precipDate, []);
+    precipByDay.get(precipDate)!.push(i);
     if (!byDay.has(key)) byDay.set(key, []);
     byDay.get(key)!.push(i);
   });
@@ -225,7 +238,7 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
   const daily = Array.from(byDay.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, indices], i) => {
-      const row: any = summarize(model, date, indices, json.hourly);
+      const row: any = summarize(model, date, indices, precipByDay.get(date) || [], expectedHours(date, timeZone), json.hourly);
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
@@ -268,7 +281,7 @@ export function aggregate(results: any[]) {
 
     const summitWind = weightedZero("summitWindKph");
     const summitTemp = weightedZero("summitTempC");
-    const precip = weightedZero("precipMm");
+    const precip = weighted("precipMm");
     const windSpread = spread(basis.map((value: any) => value.summitWindKph));
     const tempSpread = spread(basis.map((value: any) => value.summitTempC));
     const precipSpread = spread(basis.map((value: any) => value.precipMm));
@@ -296,8 +309,8 @@ export function aggregate(results: any[]) {
       valleyTempGfsC: round1(weightedZero("valleyTempC") - spread(basis.map((v: any) => v.valleyTempC)) / 2),
       valleyTempEcmwfC: round1(weightedZero("valleyTempC") + spread(basis.map((v: any) => v.valleyTempC)) / 2),
 
-      precipGfsMm: round1(Math.max(0, precip - precipSpread / 2)),
-      precipEcmwfMm: round1(precip + Math.min(precip, precipSpread / 2)),
+      precipGfsMm: precip === null ? null : round1(Math.max(0, precip - precipSpread / 2)),
+      precipEcmwfMm: precip === null ? null : round1(precip + Math.min(precip, precipSpread / 2)),
       summitRainGfsMm: round1(weightedZero("summitRainMm")),
       summitRainEcmwfMm: round1(weightedZero("summitRainMm")),
       summitSnowGfsCm: round1(weightedZero("summitSnowCm")),
@@ -332,7 +345,7 @@ export function aggregate(results: any[]) {
           const wn = basis.find((v: any) => v.modelId === WEATHER_NEXT_ID && isNum(v.precipMm));
           const others = basis.filter((v: any) => v.modelId !== WEATHER_NEXT_ID);
           const without = weightedAvg(others.map((v: any) => ({ value: v.precipMm, weight: v.weight })));
-          return wn && isNum(without) ? round1(precip - without) : null;
+          return wn && precip !== null && isNum(without) ? round1(precip - without) : null;
         })(),
         cloudSpreadPct: round1(spread(basis.map((value: any) => value.cloudCoverPct))),
       },
@@ -418,6 +431,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
       const normalized = normalizeWeatherNext(result.value, timeZone);
       successful.push(normalized);
       weatherNext = {
+        latestValidTime: normalized.latestValidTime,
         status: normalized.stale ? "stale" : "available", runStart: normalized.runStart, timeZone,
         message: normalized.stale ? "WeatherNext run is over 24 hours old and excluded from consensus." : "",
         source: "Google Earth Engine", resolution: "0.1 degrees", horizonHours: 360,

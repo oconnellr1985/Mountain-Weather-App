@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { normalizeWeatherNext, expectedHours, localDate, weatherNextInsight, WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, WEATHER_NEXT_BANDS, weatherNextRegionPayload } from "../lib/weather-next-data";
 import { aggregate, MODEL_CATALOG } from "../lib/forecast-service";
 import { safeWeatherNextError, weatherNextConfiguration } from "../lib/weather-next-server";
-import { scoreWindowForDays } from "../lib/weather";
+import { findBestWindow, scoreWindowForDays } from "../lib/weather";
 import { climbs } from "../lib/climbs";
 
 const init = "2026-10-25T00:00:00Z";
@@ -52,8 +52,9 @@ test("valid timestamps, SI conversion, native surface basis and 15-day horizon",
 test("partial days, missing precipitation and missing cloud remain unavailable to consensus", () => {
   const result = normalizeWeatherNext(payload(), "UTC", now);
   assert.equal(result.daily[0].completeDay, false);
-  assert.equal(result.daily[0].includeInConsensus, false);
-  assert.equal(result.daily[0].precipMm, null);
+  assert.equal(result.daily[0].includeInConsensus, true);
+  assert.equal(result.daily[0].precipMm, 24);
+  assert.equal(result.daily[0].cloudCoverPct, null);
   const broken = payload();
   broken.rows[50].bands.total_precipitation_1hr_mean = null;
   broken.rows[50].bands.total_cloud_cover_mean = null;
@@ -126,4 +127,28 @@ test("point-table extraction preserves valid times, lead hours and nulls indepen
   assert.equal(decoded.rows[0].forecastHour, 1);
   assert.equal(decoded.rows[0].bands.temperature_2m_mean, 273.15);
   assert.throws(() => weatherNextRegionPayload({runStart:init,table:[["time"],[now]]}), /schema/);
+});
+
+test("midnight precipitation belongs to the preceding day, and an incomplete total stays missing", () => {
+  const storm = payload({ total_precipitation_1hr_mean: 0 });
+  storm.rows[23].bands.total_precipitation_1hr_mean = 0.007;
+  let result = normalizeWeatherNext(storm, "UTC", now);
+  assert.equal(result.daily[0].precipMm, 7);
+  assert.equal(result.daily[1].precipMm, 0);
+  storm.rows[23].bands.total_precipitation_1hr_mean = null;
+  result = normalizeWeatherNext(storm, "UTC", now);
+  assert.equal(result.daily[0].precipMm, null);
+  assert.equal(result.daily[1].precipMm, 0);
+});
+
+test("days without precipitation contributors cannot rank as dry windows", () => {
+  const date = "2026-10-25";
+  const days = aggregate([{ model: { id: "gfs", maxLeadDays: 16 }, daily: [
+    { ...conventional(date), precipMm: null },
+    conventional("2026-10-26"),
+    conventional("2026-10-27"),
+  ] }]);
+  assert.equal(days[0].precipGfsMm, null);
+  assert.equal(days[0].modelStats.fieldModelCounts.precipitation, 0);
+  assert.equal(findBestWindow(climbs[0], [], days).label, "NO DATA");
 });
