@@ -10,6 +10,7 @@ import AvalanchePanel from "@/components/AvalanchePanel";
 import { localDate } from "@/lib/weather-next-data";
 import { NORTH_TWIN_LOCATION } from "@/lib/objective-locations";
 import { usePlotWidth } from "@/components/use-plot-width";
+import { interpolateElevationTemperature } from "@/lib/elevation-temperature";
 
 const ObjectiveMap = dynamic(() => import("@/components/ObjectiveMap"), { ssr: false, loading: () => <p className="p-5">Loading map…</p> });
 
@@ -386,7 +387,7 @@ function scoreWindowForDays(climb, forecastDays = []) {
       if (t.solarSensitivePowder) {
         const solar = solarReliability(d);
         const midTemp = dayMidTemp(d);
-        if (solar !== null && solar > 0.75 && midTemp > -4) p += 1.1 + Math.max(0, midTemp + 4) * 0.18;
+        if (solar !== null && midTemp !== null && solar > 0.75 && midTemp > -4) p += 1.1 + Math.max(0, midTemp + 4) * 0.18;
       }
       return s + p;
     }, 0);
@@ -836,19 +837,20 @@ function routeElevationProfile(climb) {
   return profiles[climb.id] || { entranceM: climb.summitM, exitM: Math.max(1000, climb.summitM - 1200), descentLabel: "High point → exit", aspect: "solar", slopeDeg: 32, climbHours: 5, skiHours: 2 };
 }
 
-function estimateTempAtElevation(day, elevationM, climb) {
-  const summitAvg = daySummitTemp(day);
-  const deltaM = climb.summitM - elevationM;
-  return summitAvg + (deltaM / 1000) * 6.5;
+function modelTemperatureAtElevation(day, elevationM, climb, metric = "mean") {
+  const altitude = day.altitudeGuidance || {};
+  const summit = metric === "min" ? day.summitTempMinAvgC : metric === "max" ? day.summitTempMaxAvgC : daySummitTemp(day);
+  const mid = metric === "min" ? altitude.midTempMinC : metric === "max" ? altitude.midTempMaxC : altitude.midTempC;
+  const lower = metric === "min" ? altitude.lowerTempMinC : metric === "max" ? altitude.lowerTempMaxC : altitude.lowerTempC;
+  return interpolateElevationTemperature([
+    { elevationM: climb.summitM, temperatureC: summit },
+    { elevationM: altitude.midM, temperatureC: mid },
+    { elevationM: altitude.lowerM, temperatureC: lower },
+  ], elevationM);
 }
-function estimateLowAtElevation(day, elevationM, climb) {
-  const summitLow = typeof day.summitTempMinAvgC === "number" ? day.summitTempMinAvgC : daySummitTemp(day) - 3;
-  return summitLow + ((climb.summitM - elevationM) / 1000) * 6.5;
-}
-function estimateHighAtElevation(day, elevationM, climb) {
-  const summitHigh = typeof day.summitTempMaxAvgC === "number" ? day.summitTempMaxAvgC : daySummitTemp(day) + 3;
-  return summitHigh + ((climb.summitM - elevationM) / 1000) * 6.5;
-}
+function estimateTempAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb); }
+function estimateLowAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb, "min"); }
+function estimateHighAtElevation(day, elevationM, climb) { return modelTemperatureAtElevation(day, elevationM, climb, "max"); }
 function degToRad(v) { return v * Math.PI / 180; }
 function radToDeg(v) { return v * 180 / Math.PI; }
 function saturationVaporPressureHpa(tC) { return 6.112 * Math.exp((17.67 * tC) / (tC + 243.5)); }
@@ -934,6 +936,8 @@ function makeCornHourly(day, climb, elevationM, kind) {
   const high = estimateHighAtElevation(day, elevationM, climb);
   const precip = dayPrecip(day);
   const wind = dayWind(day);
+  // Never run the snow-surface calculation with a fabricated 0°C or a fixed lapse rate.
+  if (![low, high, precip, wind].every(v => typeof v === "number" && Number.isFinite(v))) return [];
   const rh = day.rhPct ?? day.relativeHumidityPct ?? 70;
   const cloud = cornCloudFraction(day);
   const rho = cornDensityForClimb(climb);
@@ -971,6 +975,7 @@ function analyzeCornDay(climb, day) {
   const profile = routeElevationProfile(climb);
   const entrance = makeCornHourly(day, climb, profile.entranceM, "entrance");
   const exit = makeCornHourly(day, climb, profile.exitM, "exit");
+  if (!entrance.length || !exit.length) return null;
   const primeEntrance = entrance.filter((h) => h.state === "Prime corn");
   const primeExit = exit.filter((h) => h.state === "Prime corn");
   const entranceStart = primeEntrance[0]?.hour || null;
@@ -993,7 +998,8 @@ function analyzeCornDay(climb, day) {
 }
 function analyzeCornCycle(climb, forecast = []) {
   if (climb.routeType !== "ski_corn" || !forecast.length) return null;
-  const days = forecast.slice(0, 7).map((day) => analyzeCornDay(climb, day));
+  const days = forecast.slice(0, 7).map((day) => analyzeCornDay(climb, day)).filter(Boolean);
+  if (!days.length) return null;
   const best = [...days].sort((a, b) => b.cornScore - a.cornScore)[0];
   return { ...best, days };
 }
@@ -1037,7 +1043,7 @@ function CornCycleGraph({ title, elevationM, rows = [] }) {
 }
 function CornCyclePanel({ climb, forecast }) {
   const analysis = analyzeCornCycle(climb, forecast);
-  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Corn-cycle analysis is only shown for ski-corn objectives with live forecast data.</div>;
+  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Corn-cycle analysis requires model-native temperature guidance at the route elevations; it is unavailable where those forecast fields are missing.</div>;
   const bestDayLabel = `${analysis.day.label}${analysis.day.date ? ` · ${analysis.day.date}` : ""}`;
   return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-5"><MetricCard icon={SunIcon} label="Best 7-day Corn Score" value={`${analysis.cornScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.cornScore)} /><MetricCard icon={SnowIcon} label="Best Refreeze Score" value={`${analysis.refreezeScore.toFixed(1)} / 10`} detail="Overnight supportability" className={scoreColor(analysis.refreezeScore)} /><MetricCard icon={SunIcon} label="Solar Reliability" value={solarReliability(analysis.day) === null ? "NO DATA" : `${Math.round(solarReliability(analysis.day) * 100)}%`} detail={`Low cloud ${cloudText(dayLowCloudPct(analysis.day))} · total ${cloudText(dayCloudPct(analysis.day))}`} className={scoreColor((solarReliability(analysis.day) ?? 0) * 10)} /><MetricCard icon={MountainIcon} label="Best Ski Entrance" value={analysis.targetSki ? `${analysis.targetSki}:00` : "No clear time"} detail={`${analysis.profile.entranceM} m · ${analysis.profile.aspect}`} /><MetricCard icon={TrendIcon} label="Best Exit Target" value={analysis.exitTarget ? `${analysis.exitTarget}:00` : "No clear time"} detail={`${analysis.profile.exitM} m lower route`} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day corn-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">Best-day strategy is based on {bestDayLabel}. The graphs and heatmaps compare the entrance/high point and the lower exit elevation across the next 7 forecast days. Green means the Ullr-style surface-state model estimates a prime corn window; blue is delayed/icy; orange is too soft/wet. Hover over the curve for time, effective temp, melt/refreeze values, and surface-state interpretation.</p></CardContent></Card><div className="grid gap-4"><CornCycleCurveGraph title="Entrance / high-point 7-day corn curve" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleCurveGraph title="Exit / lower-route 7-day corn curve" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /><CornCycleHeatmap title="Entrance / high-point corn heatmap" elevationM={analysis.profile.entranceM} days={analysis.days} field="entrance" /><CornCycleHeatmap title="Exit / lower-route corn heatmap" elevationM={analysis.profile.exitM} days={analysis.days} field="exit" /></div><Card><CardContent className="p-5"><h3 className="mb-2 font-semibold">Best-day route timing strategy — {bestDayLabel}</h3><div className="grid gap-3 md:grid-cols-4 text-sm"><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Start climbing</div><div className="text-xl font-semibold">{analysis.startClimb ? `${analysis.startClimb}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Reach entrance</div><div className="text-xl font-semibold">{analysis.targetSki ? `${Math.max(analysis.targetSki - 1, 6)}:00` : "—"}</div></div><div className="rounded-xl bg-emerald-50 p-3"><div className="text-emerald-700">Start skiing</div><div className="text-xl font-semibold text-emerald-900">{analysis.targetSki ? `${analysis.targetSki}:00` : "—"}</div></div><div className="rounded-xl bg-slate-50 p-3"><div className="text-slate-500">Clear lower route</div><div className="text-xl font-semibold">{analysis.exitTarget ? `${analysis.exitTarget}:00` : "—"}</div></div></div></CardContent></Card></div>;
 }
@@ -1072,6 +1078,7 @@ function analyzePowderDay(climb, day, avalanche, priorSnowCm = 0) {
   const hasFreshPowderSource = recentSnowCm >= (climb.thresholds.minNewSnow24hCm ?? 8);
   const hasMarginalRefresh = recentSnowCm >= 3;
   const hourly = makePowderHourly(day, climb, elevationM, hasFreshPowderSource || hasMarginalRefresh);
+  if (!hourly.length) return null;
   const wind = dayWind(day);
   const summitTemp = daySummitTemp(day);
   const freezingLevel = day.freezingLevelM || 0;
@@ -1114,8 +1121,10 @@ function analyzePowderCycle(climb, forecast = [], avalanche) {
     const priorSnowCm = seven.slice(Math.max(0, index - 3), index).reduce((s, d) => s + (((d.summitSnowGfsCm || 0) + (d.summitSnowEcmwfCm || 0)) / 2), 0);
     return analyzePowderDay(climb, day, avalanche, priorSnowCm);
   });
-  const best = [...days].sort((a, b) => b.powderScore - a.powderScore)[0];
-  return { ...best, days };
+  const usableDays = days.filter(Boolean);
+  if (!usableDays.length) return null;
+  const best = [...usableDays].sort((a, b) => b.powderScore - a.powderScore)[0];
+  return { ...best, days: usableDays };
 }
 function PowderCycleGraph({ title, elevationM, days = [] }) {
   const [hover, setHover] = useState(null);
@@ -1147,7 +1156,7 @@ function PowderCycleHeatmap({ title, elevationM, days = [] }) {
 }
 function PowderCyclePanel({ climb, forecast, avalanche }) {
   const analysis = analyzePowderCycle(climb, forecast, avalanche);
-  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Powder-cycle analysis is only shown for powder/steep-ski objectives with live forecast data.</div>;
+  if (!analysis) return <div className="rounded-2xl border bg-white p-5 text-sm text-slate-700">Powder-cycle analysis requires model-native temperature guidance at route elevations; it is unavailable where those forecast fields are missing.</div>;
   const bestDayLabel = `${analysis.day.label}${analysis.day.date ? ` · ${analysis.day.date}` : ""}`;
   return <div className="space-y-4"><div className="grid gap-4 md:grid-cols-4"><MetricCard icon={SnowIcon} label="Best Powder Score" value={`${analysis.powderScore.toFixed(1)} / 10`} detail={bestDayLabel} className={scoreColor(analysis.powderScore)} /><MetricCard icon={SnowIcon} label="Powder Source" value={analysis.availability} detail={`24h: ${analysis.snow24.toFixed(1)} cm · recent: ${analysis.recentSnowCm.toFixed(1)} cm`} className={analysis.hasFreshPowderSource ? "text-emerald-700" : analysis.hasMarginalRefresh ? "text-yellow-700" : "text-red-700"} /><MetricCard icon={WindIcon} label="Wind Loading" value={`${Math.round(analysis.wind)} kph`} detail="Strong wind after snow is a major penalty" className={analysis.wind > 30 ? "text-red-700" : "text-emerald-700"} /><MetricCard icon={MountainIcon} label="Freezing Level" value={`${Math.round(analysis.freezingLevel)} m`} detail="Should stay below the route" className={analysis.freezingLevel > (climb.thresholds.maxFreezingLevelM || 2200) ? "text-red-700" : "text-emerald-700"} /></div><Card><CardContent className="p-5"><h3 className="font-semibold">7-day powder-cycle interpretation</h3><p className="mt-2 text-slate-700">{analysis.interpretation}</p><p className="mt-2 text-sm text-slate-500">This uses Ullr-style effective snow temperature and daily heat integrals for powder preservation, but separates preservation from availability. Cold conditions do not create powder unless there is recent or forecast snow. Conservative gates: no more than 20 cm in 24h, avalanche hazard Moderate or lower, freezing level below the route, and limited wind loading after snowfall.</p></CardContent></Card><div className="grid gap-4"><PowderCycleGraph title="Powder preservation curve" elevationM={analysis.profile.entranceM || climb.summitM} days={analysis.days} /><PowderCycleHeatmap title="Powder state heatmap" elevationM={analysis.profile.entranceM || climb.summitM} days={analysis.days} /></div></div>;
 }
