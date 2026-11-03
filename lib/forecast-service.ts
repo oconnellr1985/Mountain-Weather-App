@@ -220,6 +220,7 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
     } catch (error: any) {
       lastError = String(error?.message || error || "request failed");
       if (isDomainError(lastError)) throw new Error(`out of domain at ${lat.toFixed(3)}, ${lon.toFixed(3)}`);
+      if (/incomplete elevation response/i.test(lastError)) break; // retry with single summit location below
       if (isVariableError(lastError)) continue;
       // Some Open-Meteo model endpoints report generic validation errors for unavailable derived fields.
       // Permit one lower-feature retry before giving up.
