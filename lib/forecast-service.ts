@@ -1,5 +1,6 @@
 import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext } from "./weather-next-data";
 import { fetchWeatherNextPoint, safeWeatherNextError, weatherNextConfiguration } from "./weather-next-server";
+import { PROFILE_VARIABLES, PRESSURE_LEVELS, summarizePressureProfile, diagnosePrecipitationPhase, precipitationCategoryAgreement, parseElevationResponse } from "./vertical-guidance";
 
 type ModelConfig = {
   id: string;
@@ -51,17 +52,15 @@ const CORE_HOURLY = [
   "rain",
   "snowfall",
   "pressure_msl",
-  "dew_point_2m",
 ];
 
-const PROFILE_HOURLY = ["wind_speed_700hPa", "wind_speed_600hPa", "wind_speed_500hPa", "geopotential_height_700hPa", "geopotential_height_600hPa", "geopotential_height_500hPa", "relative_humidity_700hPa", "relative_humidity_600hPa", "relative_humidity_500hPa"];
 const FREEZING_HOURLY = ["freezing_level_height"];
 const CLOUD_HOURLY = ["cloud_cover", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"];
 const RADIATION_HOURLY = ["shortwave_radiation", "direct_radiation", "diffuse_radiation"];
 
 const REQUEST_TIERS = [
-  { name: "profile", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY, ...PROFILE_HOURLY] },
-  { name: "full", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
+  { name: "full", fields: [...CORE_HOURLY, "dew_point_2m", ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
+  { name: "no-dewpoint", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
   { name: "no-radiation", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY] },
   { name: "weather-cloud", fields: [...CORE_HOURLY, ...CLOUD_HOURLY] },
   { name: "core", fields: CORE_HOURLY },
@@ -73,6 +72,7 @@ const isNum = (v: any) => typeof v === "number" && Number.isFinite(v);
 const clean = (a: any[]) => a.filter(isNum);
 const avg = (a: any[]) => { const c = clean(a); return c.length ? c.reduce((s, v) => s + v, 0) / c.length : null; };
 const sum = (a: any[]) => clean(a).reduce((s, v) => s + v, 0);
+const sumOrNull = (a: any[]) => clean(a).length ? sum(a) : null;
 const max = (a: any[]) => { const c = clean(a); return c.length ? Math.max(...c) : null; };
 const min = (a: any[]) => { const c = clean(a); return c.length ? Math.min(...c) : null; };
 const spread = (a: any[]) => { const c = clean(a); return c.length > 1 ? Math.max(...c) - Math.min(...c) : 0; };
@@ -118,18 +118,18 @@ function isVariableError(message: string) {
   return /invalid.*variable|variable.*not.*available|unsupported.*variable|cannot initialize.*variable|unknown.*variable/i.test(message);
 }
 
-function urlFor(model: ModelConfig, lat: number, lon: number, summitM: number, fields: string[]) {
+function urlFor(model: ModelConfig, lat: number, lon: number, summitM: number, fields: string[], elevations?: number[], modelOverride?: string) {
   if (!model.endpoint) return null;
   const url = new URL(model.endpoint);
-  url.searchParams.set("latitude", String(lat));
-  url.searchParams.set("longitude", String(lon));
+  url.searchParams.set("latitude", elevations ? elevations.map(() => lat).join(",") : String(lat));
+  url.searchParams.set("longitude", elevations ? elevations.map(() => lon).join(",") : String(lon));
   url.searchParams.set("hourly", fields.join(","));
   url.searchParams.set("wind_speed_unit", "kmh");
   url.searchParams.set("precipitation_unit", "mm");
   url.searchParams.set("timezone", "auto");
   url.searchParams.set("forecast_days", String(Math.min(16, Math.max(1, Math.ceil(model.maxLeadDays)))));
-  url.searchParams.set("elevation", String(Math.round(summitM)));
-  if (model.models) url.searchParams.set("models", model.models);
+  url.searchParams.set("elevation", elevations ? elevations.map(x => Math.round(x)).join(",") : String(Math.round(summitM)));
+  if (modelOverride || model.models) url.searchParams.set("models", modelOverride || model.models!);
   return url.toString();
 }
 
@@ -144,7 +144,7 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   const snow = pick("snowfall");
   const pressure = pick("pressure_msl");
   const dewpoint = pick("dew_point_2m");
-  const profile = [700,600,500].map(level => ({ pressureHpa: level, heightM: avg(pick(`geopotential_height_${level}hPa`)), windKph: max(pick(`wind_speed_${level}hPa`)), relativeHumidityPct: avg(pick(`relative_humidity_${level}hPa`)) }));
+
   const freezing = pick("freezing_level_height");
   const cloud = pick("cloud_cover");
   const cloudLow = pick("cloud_cover_low");
@@ -175,18 +175,19 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     summitTempMaxC: max(temps),
     midTempC: null,
     valleyTempC: null,
-    precipMm: sum(precip),
-    summitRainMm: sum(rain),
-    summitSnowCm: sum(snow),
-    midRainMm: sum(rain),
-    midSnowCm: sum(snow),
-    valleyRainMm: sum(rain),
-    valleySnowCm: sum(snow),
+    precipMm: sumOrNull(precip),
+    summitRainMm: sumOrNull(rain),
+    summitSnowCm: sumOrNull(snow),
+    midRainMm: null,
+    midSnowCm: null,
+    valleyRainMm: null,
+    valleySnowCm: null,
     pressureHpa: avg(pressure),
     dewPointC: avg(dewpoint),
-    atmosphericProfile: profile,
-    precipitationPhaseNote: "Provider rain/snow partition; not independently corrected to summit wet-bulb temperature",
-    elevationAdjustmentNote: "Temperature requested at target elevation; mid/valley values withheld pending separate elevation requests",
+    atmosphericProfile: [],
+    phaseDiagnostic: diagnosePrecipitationPhase(hourly, idx, 0), // Recomputed with actual summit elevation below.
+    precipitationPhaseNote: "Model rain/snow values unchanged; near-freezing phase is a diagnostic only.",
+    elevationAdjustmentNote: "Open-Meteo downscaled temperature at requested elevation; not a separate valley grid cell.",
     freezingLevelM: avg(freezing),
     cloudCoverPct: avg(cloud),
     cloudCoverLowPct: avg(cloudLow),
@@ -198,16 +199,22 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   };
 }
 
-async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM: number) {
+async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM: number, midM: number, valleyM: number) {
   if (!model.endpoint) throw new Error(model.note || "connector not implemented");
 
   let json: any = null;
+  let surfaceRows: any[] = [];
   let requestTier = "";
+  const elevations = [summitM, midM, valleyM];
+  let elevationRequestStatus = "unavailable";
   let lastError = "";
 
   for (const tier of REQUEST_TIERS) {
     try {
-      json = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields)!);
+      const response = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields, elevations)!);
+      surfaceRows = parseElevationResponse(response, elevations.length);
+      json = surfaceRows[0];
+      elevationRequestStatus = "three-elevation";
       requestTier = tier.name;
       break;
     } catch (error: any) {
@@ -221,7 +228,35 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
     }
   }
 
+  // Not all model endpoints accept multi-location calls. Fall back to summit-only,
+  // and explicitly leave lower-elevation outputs unavailable instead of inventing them.
+  if (!json) for (const tier of REQUEST_TIERS) {
+    try {
+      json = await fetchJson(urlFor(model, lat, lon, summitM, tier.fields)!);
+      surfaceRows = parseElevationResponse(json, 1);
+      elevationRequestStatus = "summit-only";
+      requestTier = tier.name;
+      break;
+    } catch (error: any) {
+      lastError = String(error?.message || error || "request failed");
+      if (isDomainError(lastError)) throw new Error(`out of domain at ${lat.toFixed(3)}, ${lon.toFixed(3)}`);
+      if (!isVariableError(lastError) && !/invalid|not available|unsupported|cannot initialize/i.test(lastError)) throw error;
+    }
+  }
   if (!json) throw new Error(lastError || "No supported variable set returned data");
+  // Separate optional free-atmosphere profile request: its failure NEVER suppresses
+  // the model's main surface forecast. ECMWF HRES 9 km needs IFS025 for pressure data.
+  let upperAir: any = null;
+  let upperAirSource: string | null = null;
+  if (["gfs", "ecmwf_ifs", "gem_global", "gem_regional"].includes(model.id)) {
+    const modelAlias = model.id === "ecmwf_ifs" ? "ecmwf_ifs025" : model.models;
+    for (const fields of [PROFILE_VARIABLES, PROFILE_VARIABLES.filter(v => !v.startsWith("relative_humidity_"))]) {
+      try {
+        const raw = await fetchJson(urlFor(model, lat, lon, summitM, fields, undefined, modelAlias)! , 1);
+        if (Array.isArray(raw?.hourly?.time)) { upperAir = raw.hourly; upperAirSource = modelAlias || null; break; }
+      } catch { /* Optional upper-air data; surface guidance remains valid. */ }
+    }
+  }
   if (!json.hourly || !Array.isArray(json.hourly.time)) throw new Error(json.reason || json.error || "No hourly data returned");
 
   const byDay = new Map<string, number[]>();
@@ -231,6 +266,9 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
     byDay.get(key)!.push(i);
   });
 
+  const elevationData = surfaceRows.slice(1).map(row => row.hourly || {});
+  const tempAtDay = (hourly: any, date: string) => avg((hourly.time || []).map((t: string, i: number) => dayKey(t) === date ? hourly.temperature_2m?.[i] : null));
+  const profileIndices = (date: string) => (upperAir?.time || []).flatMap((t: string, i: number) => dayKey(t) === date ? [i] : []);
   const daily = Array.from(byDay.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, indices], i) => {
@@ -238,6 +276,23 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
+        row.midTempC = elevationData[0] ? tempAtDay(elevationData[0], date) : null;
+        row.valleyTempC = elevationData[1] ? tempAtDay(elevationData[1], date) : null;
+        row.phaseDiagnostic = diagnosePrecipitationPhase(json.hourly, indices, summitM);
+        row.requestedElevationsM = { summit: summitM, mid: midM, lower: valleyM };
+        row.returnedElevationsM = surfaceRows.map(x => Number.isFinite(x.elevation) ? x.elevation : null);
+        row.elevationRequestStatus = elevationRequestStatus;
+        if (upperAir) {
+          const p = summarizePressureProfile(upperAir, profileIndices(date), { summit: summitM, mid: midM, lower: valleyM });
+          row.summitFreeAirWindKph = p.summitFreeAirWindKph;
+          row.midFreeAirWindKph = p.midFreeAirWindKph;
+          row.lowerFreeAirWindKph = p.lowerFreeAirWindKph;
+          row.atmosphericProfile = p.levelData;
+          row.upperAirSource = upperAirSource;
+          row.upperAirHours = p.hoursWithProfile;
+        }
+        row.midWindKph = row.midFreeAirWindKph ?? null;
+        row.valleyWindKph = row.lowerFreeAirWindKph ?? null;
         row.cloudFieldsAvailable = Array.isArray(json.hourly.cloud_cover);
         row.radiationFieldsAvailable = Array.isArray(json.hourly.shortwave_radiation);
         row.freezingLevelAvailable = Array.isArray(json.hourly.freezing_level_height);
@@ -323,7 +378,25 @@ export function aggregate(results: any[]) {
       directRadiationWm2: round1(weighted("directRadiationWm2")),
       diffuseRadiationWm2: round1(weighted("diffuseRadiationWm2")),
 
-      atmosphericProfiles: allValues.filter((v: any) => v.atmosphericProfile?.some((p: any) => isNum(p.windKph) || isNum(p.relativeHumidityPct))).map((v: any) => ({ modelId: v.modelId, modelLabel: v.modelLabel, levels: v.atmosphericProfile })),
+      altitudeGuidance: {
+        summitM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.summit ?? null,
+        midM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.mid ?? null,
+        lowerM: allValues.find((v: any) => v.requestedElevationsM)?.requestedElevationsM?.lower ?? null,
+        summitFreeAirWindKph: round1(weighted("summitFreeAirWindKph")),
+        midFreeAirWindKph: round1(weighted("midFreeAirWindKph")),
+        lowerFreeAirWindKph: round1(weighted("lowerFreeAirWindKph")),
+        midTempC: round1(weighted("midTempC")),
+        lowerTempC: round1(weighted("valleyTempC")),
+        temperatureModels: basis.filter((v: any) => isNum(v.midTempC) && isNum(v.valleyTempC)).length,
+        upperAirModels: basis.filter((v: any) => isNum(v.summitFreeAirWindKph)).length,
+      },
+      phaseGuidance: {
+        modelsWithPrecipitation: basis.filter((v: any) => (v.phaseDiagnostic?.precipHours ?? 0) > 0).length,
+        modelsFlaggingUncertainPhase: basis.filter((v: any) => v.phaseDiagnostic?.uncertainHours > 0).length,
+        uncertainPhasePrecipMeanMm: round1(avg(basis.map((v: any) => v.phaseDiagnostic?.uncertainPrecipMm))),
+        note: "Near-freezing precipitation phase diagnostic; native rain/snow quantities unchanged.",
+      },
+      atmosphericProfiles: allValues.filter((v: any) => v.atmosphericProfile?.some((p: any) => isNum(p.maxWindKph) || isNum(p.relativeHumidityPct))).map((v: any) => ({ modelId: v.modelId, modelLabel: v.modelLabel, sourceModel: v.upperAirSource, levels: v.atmosphericProfile })),
       modelStats: {
         modelCount: allValues.length,
         consensusModelCount: basis.length,
@@ -345,7 +418,9 @@ export function aggregate(results: any[]) {
           const without = weightedAvg(others.map((v: any) => ({ value: v.precipMm, weight: v.weight })));
           return wn && isNum(without) ? round1(precip - without) : null;
         })(),
-        precipitationAgreement: (() => { const categories = basis.filter((v: any) => isNum(v.precipMm)).map((v: any) => v.precipMm < 0.1 ? "none" : v.precipMm < 1 ? "trace" : v.precipMm < 10 ? "light" : "heavy"); if (categories.length < 2) return { status: "insufficient-models", modelCount: categories.length }; const counts = categories.reduce((m: any, c: string) => ({ ...m, [c]: (m[c] || 0) + 1 }), {}); return { status: "available", modelCount: categories.length, agreementFraction: round1(Math.max(...Object.values(counts).map(Number)) / categories.length), categories: counts }; })(),
+        precipitationAgreement: precipitationCategoryAgreement(basis.map((v: any) => v.precipMm)),
+        freezingSpreadM: round0(spread(basis.map((v: any) => v.freezingLevelM))),
+        fieldModelCountsByVariable: { wind: basis.filter((v: any) => isNum(v.summitWindKph)).length, upperAirWind: basis.filter((v: any) => isNum(v.midFreeAirWindKph)).length, temperature: basis.filter((v: any) => isNum(v.summitTempC)).length, lowerTemperature: basis.filter((v: any) => isNum(v.valleyTempC)).length, precipitation: basis.filter((v: any) => isNum(v.precipMm)).length, freezing: basis.filter((v: any) => isNum(v.freezingLevelM)).length },
         cloudSpreadPct: round1(spread(basis.map((value: any) => value.cloudCoverPct))),
       },
 
@@ -401,7 +476,11 @@ async function history(lat: number, lon: number, summitM: number) {
   }
 }
 
-export async function getWeatherData({ lat, lon, summitM, region = "global" }: { lat: number; lon: number; summitM: number; region?: string }) {
+export async function getWeatherData({ lat, lon, summitM, midM, valleyM, region = "global" }: { lat: number; lon: number; summitM: number; midM?: number; valleyM?: number; region?: string }) {
+  // Representative targets are explicit and auditable, not hardcoded weather adjustments.
+  // If the caller does not know route elevations, use provisional bands and flag them.
+  const lowerTargetM = isNum(valleyM) && valleyM < summitM ? valleyM : Math.max(0, summitM - 1200);
+  const midTargetM = isNum(midM) && midM > lowerTargetM && midM < summitM ? midM : Math.round((summitM + lowerTargetM) / 2);
   const models = MODEL_CATALOG.filter(model => applies(model, region));
   const successful: any[] = [];
   const unavailableModels: string[] = [];
@@ -413,7 +492,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   const historyPromise = history(lat, lon, summitM);
   for (const model of models.filter(m => m.id !== WEATHER_NEXT_ID)) {
     try {
-      successful.push(await fetchModel(model, lat, lon, summitM));
+      successful.push(await fetchModel(model, lat, lon, summitM, midTargetM, lowerTargetM));
       await delay(180);
     } catch (error: any) {
       unavailableModels.push(model.label + ": " + (error?.message || "unavailable"));
@@ -448,7 +527,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   }
   return {
     source: "Direct model-specific Open-Meteo feeds, with Google WeatherNext 3 via Earth Engine when authorized. WeatherNext uses native grid surface temperature/wind; complete-day precipitation, cloud, pressure and solar means enter the weighted analysis as one additional source. No WeatherNext summit adjustment, snowfall split or freezing level is inferred. RAP remains NO DATA pending a direct connector.",
-    target: { latitude: lat, longitude: lon, elevationM: summitM, windBasis: "grid-cell 10m wind/gust; no summit interpolation; pressure-level profiles available by model", precipitationBasis: "grid-area total; provider rain/snow partition is not summit phase verified", elevationGuidance: "Mid/valley values intentionally unavailable until separate elevation-specific model requests are implemented" },
+    target: { latitude: lat, longitude: lon, elevationM: summitM, midElevationM: midTargetM, lowerElevationM: lowerTargetM, targetElevationIsApproximate: !isNum(valleyM), windBasis: "grid-cell 10m peak gust/wind; pressure-level winds separately interpolated at actual model geopotential heights (free atmosphere, not terrain wind)", precipitationBasis: "grid-area total; provider rain/snow partition with independent wet-bulb/freezing-level uncertainty diagnostics", elevationGuidance: "Open-Meteo multi-location elevation-downscaled temperature at same coordinates; pressure-level interpolated wind is free-air and is not a ridge/valley surface forecast" },
     unavailableModels, weatherNext, timeZone: successful.find(r => r.timeZone)?.timeZone,
     modelCatalog: models.map(model => ({
       id: model.id, label: model.label, provider: model.provider, maxLeadDays: model.maxLeadDays,
