@@ -1,4 +1,5 @@
-import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext } from "./weather-next-data";
+import { WEATHER_NEXT_ID, WEATHER_NEXT_MODEL, normalizeWeatherNext, expectedHours } from "./weather-next-data";
+import { assessDailyCoverage, validateSnowfall, comparableWindGust } from "./forecast-validation";
 import { fetchWeatherNextPoint, safeWeatherNextError, weatherNextConfiguration } from "./weather-next-server";
 import { PROFILE_VARIABLES, PRESSURE_LEVELS, summarizePressureProfile, diagnosePrecipitationPhase, precipitationCategoryAgreement, parseElevationResponse } from "./vertical-guidance";
 
@@ -154,9 +155,10 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   const direct = pick("direct_radiation");
   const diffuse = pick("diffuse_radiation");
 
-  const peakWind = max(gust) ?? max(wind);
+  const windValues = comparableWindGust(max(gust), max(wind));
   const temp = avg(temps);
-  if (!isNum(temp) && !isNum(peakWind) && precip.length === 0) return null;
+  if (!isNum(temp) && !isNum(windValues.gustKph) && !isNum(windValues.wind10mKph) && precip.length === 0) return null;
+  const snowValidity = validateSnowfall(sumOrNull(snow), sumOrNull(precip));
 
   return {
     modelId: model.id,
@@ -166,8 +168,11 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     includeInConsensus: model.includeInConsensus !== false,
     dayIndex: null,
     date,
-    summitWindKph: peakWind,
-    windBasis: gust.length ? "daily_peak_gust" : "daily_peak_10m_wind",
+    // Only 10 m gusts are used in the cross-model gust consensus.
+    // A 10 m mean wind is recorded separately, NEVER treated as a gust fallback.
+    summitWindKph: windValues.gustKph,
+    summitMeanWind10mKph: windValues.wind10mKph,
+    windBasis: gust.length ? "daily_peak_gust" : "10m_wind_only_no_gust",
     midWindKph: null,
     valleyWindKph: null,
     summitTempC: temp,
@@ -177,7 +182,9 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     valleyTempC: null,
     precipMm: sumOrNull(precip),
     summitRainMm: sumOrNull(rain),
-    summitSnowCm: sumOrNull(snow),
+    summitSnowCm: snowValidity.value,
+    rawSummitSnowCm: sumOrNull(snow),
+    dataQualityWarnings: snowValidity.warning ? [snowValidity.warning] : [],
     midRainMm: null,
     midSnowCm: null,
     valleyRainMm: null,
@@ -280,6 +287,10 @@ async function fetchModel(model: ModelConfig, lat: number, lon: number, summitM:
       if (row) {
         row.dayIndex = i + 1;
         row.requestTier = requestTier;
+        row.dailyCoverage = assessDailyCoverage(indices.length, expectedHours(date, json.timezone || "UTC"));
+        // This model may still provide valuable partial-day hazard guidance, but must
+        // not bias a complete calendar-day multi-model comparison or recommendation.
+        row.includeInConsensus = row.includeInConsensus && row.dailyCoverage.complete;
         const middle = elevationData[0] ? temperatureAtDay(elevationData[0], date) : null;
         const lower = elevationData[1] ? temperatureAtDay(elevationData[1], date) : null;
         row.midTempC = middle?.average ?? null;
@@ -334,16 +345,17 @@ export function aggregate(results: any[]) {
     if (!allValues.length) continue;
 
     const consensusValues = allValues.filter((value: any) => value.includeInConsensus !== false && value.weight > 0);
-    const basis = consensusValues.length ? consensusValues : allValues.filter((value: any) => value.modelId !== WEATHER_NEXT_ID);
+    const basis = consensusValues;
+    // Never restore partial-day, stale, blended or unavailable forecasts as consensus.
+    if (!basis.length) continue;
 
     const weighted = (key: string) => weightedAvg(basis.map((value: any) => ({ value: value[key], weight: value.weight || 1 })));
-    const weightedZero = (key: string) => weighted(key) ?? 0;
     const nullableBounds = (key: string) => { const center = weighted(key); if (!isNum(center)) return [null, null]; const width = spread(basis.map((v: any) => v[key])); return [round1(center - width / 2), round1(center + width / 2)]; };
     const average = (key: string) => avg(basis.map((value: any) => value[key]));
 
-    const summitWind = weightedZero("summitWindKph");
-    const summitTemp = weightedZero("summitTempC");
-    const precip = weightedZero("precipMm");
+    const summitWind = weighted("summitWindKph");
+    const summitTemp = weighted("summitTempC");
+    const precip = weighted("precipMm");
     const windSpread = spread(basis.map((value: any) => value.summitWindKph));
     const tempSpread = spread(basis.map((value: any) => value.summitTempC));
     const precipSpread = spread(basis.map((value: any) => value.precipMm));
@@ -355,15 +367,15 @@ export function aggregate(results: any[]) {
 
       // Legacy field names retained because the frontend uses these as lower/upper consensus traces,
       // not literal GFS-vs-ECMWF values.
-      summitWindGfsKph: round1(summitWind - windSpread / 2),
-      summitWindEcmwfKph: round1(summitWind + windSpread / 2),
+      summitWindGfsKph: isNum(summitWind) ? round1(summitWind - windSpread / 2) : null,
+      summitWindEcmwfKph: isNum(summitWind) ? round1(summitWind + windSpread / 2) : null,
       midWindGfsKph: nullableBounds("midWindKph")[0],
       midWindEcmwfKph: nullableBounds("midWindKph")[1],
       valleyWindGfsKph: nullableBounds("valleyWindKph")[0],
       valleyWindEcmwfKph: nullableBounds("valleyWindKph")[1],
 
-      summitTempGfsC: round1(summitTemp - tempSpread / 2),
-      summitTempEcmwfC: round1(summitTemp + tempSpread / 2),
+      summitTempGfsC: isNum(summitTemp) ? round1(summitTemp - tempSpread / 2) : null,
+      summitTempEcmwfC: isNum(summitTemp) ? round1(summitTemp + tempSpread / 2) : null,
       summitTempMinAvgC: round1(average("summitTempMinC") ?? summitTemp),
       summitTempMaxAvgC: round1(average("summitTempMaxC") ?? summitTemp),
       midTempGfsC: nullableBounds("midTempC")[0],
@@ -371,12 +383,12 @@ export function aggregate(results: any[]) {
       valleyTempGfsC: nullableBounds("valleyTempC")[0],
       valleyTempEcmwfC: nullableBounds("valleyTempC")[1],
 
-      precipGfsMm: round1(Math.max(0, precip - precipSpread / 2)),
-      precipEcmwfMm: round1(precip + Math.min(precip, precipSpread / 2)),
-      summitRainGfsMm: round1(weightedZero("summitRainMm")),
-      summitRainEcmwfMm: round1(weightedZero("summitRainMm")),
-      summitSnowGfsCm: round1(weightedZero("summitSnowCm")),
-      summitSnowEcmwfCm: round1(weightedZero("summitSnowCm")),
+      precipGfsMm: isNum(precip) ? round1(Math.max(0, precip - precipSpread / 2)) : null,
+      precipEcmwfMm: isNum(precip) ? round1(precip + Math.min(precip, precipSpread / 2)) : null,
+      summitRainGfsMm: round1(weighted("summitRainMm")),
+      summitRainEcmwfMm: round1(weighted("summitRainMm")),
+      summitSnowGfsCm: round1(weighted("summitSnowCm")),
+      summitSnowEcmwfCm: round1(weighted("summitSnowCm")),
 
       freezingLevelM: round0(weighted("freezingLevelM")),
       pressureHpa: round0(weighted("pressureHpa")),
@@ -423,9 +435,11 @@ export function aggregate(results: any[]) {
         consensusModels: basis.map((value: any) => value.modelLabel),
         guidanceOnlyModels: allValues.filter((value: any) => value.includeInConsensus === false).map((value: any) => value.modelLabel),
         weightedModels: basis.map((value: any) => `${value.modelLabel} (${value.weight})`),
-        windSpreadKph: round1(windSpread),
+        windSpreadKph: basis.filter((v: any) => isNum(v.summitWindKph)).length > 1 ? round1(windSpread) : null,
+        windBasis: "daily peak 10m gust only",
+        windOnlyModelsExcluded: allValues.filter((v: any) => !isNum(v.summitWindKph) && isNum(v.summitMeanWind10mKph)).map((v: any) => v.modelLabel),
         tempSpreadC: round1(tempSpread),
-        precipSpreadMm: round1(precipSpread),
+        precipSpreadMm: basis.filter((v: any) => isNum(v.precipMm)).length > 1 ? round1(precipSpread) : null,
         weatherNextPrecipDeltaMm: (() => {
           const wn = basis.find((v: any) => v.modelId === WEATHER_NEXT_ID && isNum(v.precipMm));
           const others = basis.filter((v: any) => v.modelId !== WEATHER_NEXT_ID);
@@ -433,9 +447,11 @@ export function aggregate(results: any[]) {
           return wn && isNum(without) ? round1(precip - without) : null;
         })(),
         precipitationAgreement: precipitationCategoryAgreement(basis.map((v: any) => v.precipMm)),
-        freezingSpreadM: round0(spread(basis.map((v: any) => v.freezingLevelM))),
+        freezingSpreadM: basis.filter((v: any) => isNum(v.freezingLevelM)).length > 1 ? round0(spread(basis.map((v: any) => v.freezingLevelM))) : null,
         fieldModelCountsByVariable: { wind: basis.filter((v: any) => isNum(v.summitWindKph)).length, upperAirWind: basis.filter((v: any) => isNum(v.midFreeAirWindKph)).length, temperature: basis.filter((v: any) => isNum(v.summitTempC)).length, lowerTemperature: basis.filter((v: any) => isNum(v.valleyTempC)).length, precipitation: basis.filter((v: any) => isNum(v.precipMm)).length, freezing: basis.filter((v: any) => isNum(v.freezingLevelM)).length },
         cloudSpreadPct: round1(spread(basis.map((value: any) => value.cloudCoverPct))),
+        partialDayModels: allValues.filter((v: any) => v.dailyCoverage?.complete === false).map((v: any) => ({ id: v.modelId, label: v.modelLabel, hours: v.dailyCoverage.hours, expectedHours: v.dailyCoverage.expectedHours, precipitationMm: v.precipMm })),
+        dataQualityWarnings: allValues.flatMap((v: any) => (v.dataQualityWarnings || []).map((warning: string) => `${v.modelLabel}: ${warning}`)),
       },
 
       modelValues: allValues.map((value: any) => ({ ...value })),
