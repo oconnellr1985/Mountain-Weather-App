@@ -51,13 +51,16 @@ const CORE_HOURLY = [
   "rain",
   "snowfall",
   "pressure_msl",
+  "dew_point_2m",
 ];
 
+const PROFILE_HOURLY = ["wind_speed_700hPa", "wind_speed_600hPa", "wind_speed_500hPa", "geopotential_height_700hPa", "geopotential_height_600hPa", "geopotential_height_500hPa", "relative_humidity_700hPa", "relative_humidity_600hPa", "relative_humidity_500hPa"];
 const FREEZING_HOURLY = ["freezing_level_height"];
 const CLOUD_HOURLY = ["cloud_cover", "cloud_cover_low", "cloud_cover_mid", "cloud_cover_high"];
 const RADIATION_HOURLY = ["shortwave_radiation", "direct_radiation", "diffuse_radiation"];
 
 const REQUEST_TIERS = [
+  { name: "profile", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY, ...PROFILE_HOURLY] },
   { name: "full", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY, ...RADIATION_HOURLY] },
   { name: "no-radiation", fields: [...CORE_HOURLY, ...FREEZING_HOURLY, ...CLOUD_HOURLY] },
   { name: "weather-cloud", fields: [...CORE_HOURLY, ...CLOUD_HOURLY] },
@@ -140,6 +143,8 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
   const rain = pick("rain");
   const snow = pick("snowfall");
   const pressure = pick("pressure_msl");
+  const dewpoint = pick("dew_point_2m");
+  const profile = [700,600,500].map(level => ({ pressureHpa: level, heightM: avg(pick(`geopotential_height_${level}hPa`)), windKph: max(pick(`wind_speed_${level}hPa`)), relativeHumidityPct: avg(pick(`relative_humidity_${level}hPa`)) }));
   const freezing = pick("freezing_level_height");
   const cloud = pick("cloud_cover");
   const cloudLow = pick("cloud_cover_low");
@@ -163,13 +168,13 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     date,
     summitWindKph: peakWind,
     windBasis: gust.length ? "daily_peak_gust" : "daily_peak_10m_wind",
-    midWindKph: isNum(peakWind) ? peakWind * 0.75 : null,
-    valleyWindKph: isNum(peakWind) ? peakWind * 0.45 : null,
+    midWindKph: null,
+    valleyWindKph: null,
     summitTempC: temp,
     summitTempMinC: min(temps),
     summitTempMaxC: max(temps),
-    midTempC: isNum(temp) ? temp + 5 : null,
-    valleyTempC: isNum(temp) ? temp + 10 : null,
+    midTempC: null,
+    valleyTempC: null,
     precipMm: sum(precip),
     summitRainMm: sum(rain),
     summitSnowCm: sum(snow),
@@ -178,6 +183,10 @@ function summarize(model: ModelConfig, date: string, idx: number[], hourly: any)
     valleyRainMm: sum(rain),
     valleySnowCm: sum(snow),
     pressureHpa: avg(pressure),
+    dewPointC: avg(dewpoint),
+    atmosphericProfile: profile,
+    precipitationPhaseNote: "Provider rain/snow partition; not independently corrected to summit wet-bulb temperature",
+    elevationAdjustmentNote: "Temperature requested at target elevation; mid/valley values withheld pending separate elevation requests",
     freezingLevelM: avg(freezing),
     cloudCoverPct: avg(cloud),
     cloudCoverLowPct: avg(cloudLow),
@@ -264,6 +273,7 @@ export function aggregate(results: any[]) {
 
     const weighted = (key: string) => weightedAvg(basis.map((value: any) => ({ value: value[key], weight: value.weight || 1 })));
     const weightedZero = (key: string) => weighted(key) ?? 0;
+    const nullableBounds = (key: string) => { const center = weighted(key); if (!isNum(center)) return [null, null]; const width = spread(basis.map((v: any) => v[key])); return [round1(center - width / 2), round1(center + width / 2)]; };
     const average = (key: string) => avg(basis.map((value: any) => value[key]));
 
     const summitWind = weightedZero("summitWindKph");
@@ -282,19 +292,19 @@ export function aggregate(results: any[]) {
       // not literal GFS-vs-ECMWF values.
       summitWindGfsKph: round1(summitWind - windSpread / 2),
       summitWindEcmwfKph: round1(summitWind + windSpread / 2),
-      midWindGfsKph: round1(weightedZero("midWindKph") - spread(basis.map((v: any) => v.midWindKph)) / 2),
-      midWindEcmwfKph: round1(weightedZero("midWindKph") + spread(basis.map((v: any) => v.midWindKph)) / 2),
-      valleyWindGfsKph: round1(weightedZero("valleyWindKph") - spread(basis.map((v: any) => v.valleyWindKph)) / 2),
-      valleyWindEcmwfKph: round1(weightedZero("valleyWindKph") + spread(basis.map((v: any) => v.valleyWindKph)) / 2),
+      midWindGfsKph: nullableBounds("midWindKph")[0],
+      midWindEcmwfKph: nullableBounds("midWindKph")[1],
+      valleyWindGfsKph: nullableBounds("valleyWindKph")[0],
+      valleyWindEcmwfKph: nullableBounds("valleyWindKph")[1],
 
       summitTempGfsC: round1(summitTemp - tempSpread / 2),
       summitTempEcmwfC: round1(summitTemp + tempSpread / 2),
       summitTempMinAvgC: round1(average("summitTempMinC") ?? summitTemp),
       summitTempMaxAvgC: round1(average("summitTempMaxC") ?? summitTemp),
-      midTempGfsC: round1(weightedZero("midTempC") - spread(basis.map((v: any) => v.midTempC)) / 2),
-      midTempEcmwfC: round1(weightedZero("midTempC") + spread(basis.map((v: any) => v.midTempC)) / 2),
-      valleyTempGfsC: round1(weightedZero("valleyTempC") - spread(basis.map((v: any) => v.valleyTempC)) / 2),
-      valleyTempEcmwfC: round1(weightedZero("valleyTempC") + spread(basis.map((v: any) => v.valleyTempC)) / 2),
+      midTempGfsC: nullableBounds("midTempC")[0],
+      midTempEcmwfC: nullableBounds("midTempC")[1],
+      valleyTempGfsC: nullableBounds("valleyTempC")[0],
+      valleyTempEcmwfC: nullableBounds("valleyTempC")[1],
 
       precipGfsMm: round1(Math.max(0, precip - precipSpread / 2)),
       precipEcmwfMm: round1(precip + Math.min(precip, precipSpread / 2)),
@@ -313,6 +323,7 @@ export function aggregate(results: any[]) {
       directRadiationWm2: round1(weighted("directRadiationWm2")),
       diffuseRadiationWm2: round1(weighted("diffuseRadiationWm2")),
 
+      atmosphericProfiles: allValues.filter((v: any) => v.atmosphericProfile?.some((p: any) => isNum(p.windKph) || isNum(p.relativeHumidityPct))).map((v: any) => ({ modelId: v.modelId, modelLabel: v.modelLabel, levels: v.atmosphericProfile })),
       modelStats: {
         modelCount: allValues.length,
         consensusModelCount: basis.length,
@@ -334,6 +345,7 @@ export function aggregate(results: any[]) {
           const without = weightedAvg(others.map((v: any) => ({ value: v.precipMm, weight: v.weight })));
           return wn && isNum(without) ? round1(precip - without) : null;
         })(),
+        precipitationAgreement: (() => { const categories = basis.filter((v: any) => isNum(v.precipMm)).map((v: any) => v.precipMm < 0.1 ? "none" : v.precipMm < 1 ? "trace" : v.precipMm < 10 ? "light" : "heavy"); if (categories.length < 2) return { status: "insufficient-models", modelCount: categories.length }; const counts = categories.reduce((m: any, c: string) => ({ ...m, [c]: (m[c] || 0) + 1 }), {}); return { status: "available", modelCount: categories.length, agreementFraction: round1(Math.max(...Object.values(counts).map(Number)) / categories.length), categories: counts }; })(),
         cloudSpreadPct: round1(spread(basis.map((value: any) => value.cloudCoverPct))),
       },
 
@@ -436,7 +448,7 @@ export async function getWeatherData({ lat, lon, summitM, region = "global" }: {
   }
   return {
     source: "Direct model-specific Open-Meteo feeds, with Google WeatherNext 3 via Earth Engine when authorized. WeatherNext uses native grid surface temperature/wind; complete-day precipitation, cloud, pressure and solar means enter the weighted analysis as one additional source. No WeatherNext summit adjustment, snowfall split or freezing level is inferred. RAP remains NO DATA pending a direct connector.",
-    target: { latitude: lat, longitude: lon, elevationM: summitM, windBasis: "grid-cell 10m wind/gust; no summit interpolation", precipitationBasis: "grid-area total; no summit-specific correction" },
+    target: { latitude: lat, longitude: lon, elevationM: summitM, windBasis: "grid-cell 10m wind/gust; no summit interpolation; pressure-level profiles available by model", precipitationBasis: "grid-area total; provider rain/snow partition is not summit phase verified", elevationGuidance: "Mid/valley values intentionally unavailable until separate elevation-specific model requests are implemented" },
     unavailableModels, weatherNext, timeZone: successful.find(r => r.timeZone)?.timeZone,
     modelCatalog: models.map(model => ({
       id: model.id, label: model.label, provider: model.provider, maxLeadDays: model.maxLeadDays,
